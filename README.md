@@ -12,8 +12,8 @@
 frps-gateway ──HTTP + Basic Auth──▶ frps /api/v2/whitelist（内存白名单，连接时校验）
 ```
 
-> frps 侧白名单功能尚未实现，当前 API 契约状态为 `Draft`。
-> 冻结后的接口契约见 [`docs/api.md`](./docs/api.md)。
+> frps 白名单存储和管理 API 已完成；业务连接拦截将在 Phase 3 接入。
+> 当前可以安全验证增删查，但尚不会拒绝非白名单连接。接口契约见 [`docs/api.md`](./docs/api.md)。
 
 ## 指令
 

@@ -6,11 +6,11 @@
 
 | Module | Method | Path | Summary | Auth | Status | Updated |
 |---|---|---|---|---|---|---|
-| Whitelist | DELETE | `/api/v2/whitelist` | 删除一个 IP | Basic Auth | Draft | 2026-09-02 |
-| Whitelist | GET | `/api/v2/whitelist` | 查询当前生效条目 | Basic Auth | Draft | 2026-09-02 |
-| Whitelist | POST | `/api/v2/whitelist` | 添加 IP 或刷新有效期 | Basic Auth | Draft | 2026-09-02 |
+| Whitelist | DELETE | `/api/v2/whitelist` | 删除一个 IP | Basic Auth | Added | 2026-09-02 |
+| Whitelist | GET | `/api/v2/whitelist` | 查询当前生效条目 | Basic Auth | Added | 2026-09-02 |
+| Whitelist | POST | `/api/v2/whitelist` | 添加 IP 或刷新有效期 | Basic Auth | Added | 2026-09-02 |
 
-`Draft` 表示契约已经冻结，但 frps 服务端尚未实现。实现和测试完成后更新为 `Added`。
+三个接口已经在 frps 中实现并完成 Phase 2 自动化测试；连接拦截将在 Phase 3 接入。
 
 ## Common Behavior
 
@@ -38,9 +38,9 @@ Basic Auth 失败由 frps 现有中间件直接返回 HTTP 401 和纯文本 `Una
 
 | Date | Change | Method | Path | Summary |
 |---|---|---|---|---|
-| 2026-09-02 | Added | DELETE | `/api/v2/whitelist` | 冻结删除接口契约，待服务端实现 |
-| 2026-09-02 | Added | GET | `/api/v2/whitelist` | 冻结查询接口契约，待服务端实现 |
-| 2026-09-02 | Added | POST | `/api/v2/whitelist` | 冻结添加和刷新接口契约，待服务端实现 |
+| 2026-09-02 | Added | DELETE | `/api/v2/whitelist` | 实现删除接口和 400/401/404 错误行为 |
+| 2026-09-02 | Added | GET | `/api/v2/whitelist` | 实现未过期条目查询和稳定排序 |
+| 2026-09-02 | Added | POST | `/api/v2/whitelist` | 实现添加、TTL 默认值和重复刷新 |
 
 ## Whitelist
 
@@ -50,7 +50,7 @@ Basic Auth 失败由 frps 现有中间件直接返回 HTTP 401 和纯文本 `Una
 
 **Auth:** Basic Auth required
 
-**Status:** Draft
+**Status:** Added
 
 **Updated:** 2026-09-02
 
@@ -86,7 +86,7 @@ Basic Auth 失败由 frps 现有中间件直接返回 HTTP 401 和纯文本 `Una
 
 **Auth:** Basic Auth required
 
-**Status:** Draft
+**Status:** Added
 
 **Updated:** 2026-09-02
 
@@ -135,7 +135,7 @@ Basic Auth 失败由 frps 现有中间件直接返回 HTTP 401 和纯文本 `Una
 
 **Auth:** Basic Auth required
 
-**Status:** Draft
+**Status:** Added
 
 **Updated:** 2026-09-02
 
