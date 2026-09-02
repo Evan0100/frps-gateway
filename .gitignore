@@ -1,0 +1,7 @@
+# real config contains secrets
+bot.toml
+
+# binaries
+frps-gateway
+frps-gateway.exe
+*.exe

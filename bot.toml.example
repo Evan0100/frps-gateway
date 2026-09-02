@@ -1,0 +1,26 @@
+# frps-gateway 配置示例
+# 复制为 bot.toml 后填写真实值（bot.toml 已被 .gitignore 忽略，不会误提交）
+
+[frps]
+# frps 的 webServer 地址（即 dashboard/admin API 监听地址）
+apiAddr = "http://127.0.0.1:7500"
+# frps webServer 的 Basic Auth 账号（对应 frps.toml 的 webServer.user / webServer.password）
+user = "admin"
+password = "changeme"
+
+[feishu]
+# 飞书企业自建应用的凭证（开放平台 > 凭证与基础信息）
+appID = "cli_xxxxxxxx"
+appSecret = "xxxxxxxxxxxxxxxx"
+
+[bot]
+# 管理员鉴权，adminChatID 与 adminOpenIDs 二选一：
+#   adminChatID  —— 指定一个飞书群（oc_ 开头），群内 @机器人 的消息都受理，群成员即管理员。
+#                   推荐：入职拉群、离职踢群，名单零维护。
+#   adminOpenIDs —— 管理员的 open_id 列表（ou_ 开头），这些用户的私聊消息才受理。
+# 注意：同一员工在不同租户中的 open_id 不同，切换租户时需换成对应租户的值。
+adminChatID = "oc_xxxxxxxx"
+# adminOpenIDs = ["ou_xxxxxxxx", "ou_yyyyyyyy"]
+
+# 「加白」不带有效期时的默认时长，支持 m/h/d，如 "30m"、"2h"、"3d"
+defaultTTL = "2h"
