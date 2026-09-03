@@ -30,6 +30,9 @@ appSecret = "yyy"
 [bot]
 adminChatID = "oc_1"
 defaultTTL = "2h"
+
+[server]
+publicBaseURL = "https://access.example.com"
 `)
 	cfg, err := Load(path)
 	if err != nil {
@@ -88,5 +91,36 @@ defaultTTL = "2h"`},
 				t.Error("want validation error, got nil")
 			}
 		})
+	}
+}
+
+func TestLoadSecretsFromEnvironmentAndFile(t *testing.T) {
+	t.Setenv("FRPS_GATEWAY_TEST_PASSWORD", "from-env")
+	dir := t.TempDir()
+	secretFile := filepath.Join(dir, "feishu-secret")
+	if err := os.WriteFile(secretFile, []byte("from-file\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	path := writeConfig(t, `[frps]
+apiAddr="http://127.0.0.1:7500"
+user="admin"
+passwordEnv="FRPS_GATEWAY_TEST_PASSWORD"
+[feishu]
+appID="cli_xxx"
+appSecretFile="`+filepath.ToSlash(secretFile)+`"
+[bot]
+allowAllUsers=true
+defaultTTL="4h"
+[server]
+publicBaseURL="https://access.example.com"`)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Frps.Password != "from-env" || cfg.Feishu.AppSecret != "from-file" {
+		t.Fatalf("secrets not resolved")
+	}
+	if cfg.Bot.MaxTTLDuration() != 24*time.Hour || cfg.Bot.MaxActiveIPs != 3 {
+		t.Fatalf("unsafe defaults: ttl=%v ips=%d", cfg.Bot.MaxTTLDuration(), cfg.Bot.MaxActiveIPs)
 	}
 }

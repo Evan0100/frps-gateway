@@ -6,21 +6,56 @@
 apiAddr = "http://127.0.0.1:7500"
 # frps webServer 的 Basic Auth 账号（对应 frps.toml 的 webServer.user / webServer.password）
 user = "admin"
-password = "changeme"
+# 三选一；生产环境推荐环境变量或仅服务账号可读的文件。
+passwordEnv = "FRPS_GATEWAY_FRPS_PASSWORD"
+# passwordFile = "./secrets/frps-password"
+# password = "仅限本地开发"
 
 [feishu]
 # 飞书企业自建应用的凭证（开放平台 > 凭证与基础信息）
 appID = "cli_xxxxxxxx"
-appSecret = "xxxxxxxxxxxxxxxx"
+appSecretEnv = "FRPS_GATEWAY_FEISHU_APP_SECRET"
+# appSecretFile = "./secrets/feishu-app-secret"
+# appSecret = "仅限本地开发"
+# 长连接模式通常无需以下两项；如飞书应用启用了事件加密/校验则填写。
+# encryptKeyEnv = "FRPS_GATEWAY_FEISHU_ENCRYPT_KEY"
+# verificationTokenEnv = "FRPS_GATEWAY_FEISHU_VERIFICATION_TOKEN"
 
 [bot]
-# 管理员鉴权，adminChatID 与 adminOpenIDs 二选一：
+# 紧急停用开关：设为 false 后不建立飞书长连接，授权网页仍服务已生成链接。
+enabled = true
+# 公司内部员工均可管理“自己的授权”；飞书应用本身应限制为本企业可见。
+allowAllUsers = true
+# 群聊必须 @机器人，私聊无需 @。
+requireMentionInGroup = true
+# 管理员列表（预留给查看全量记录等管理操作）；不要使用“整群都是管理员”。
+adminOpenIDs = ["ou_xxxxxxxx"]
+# 兼容旧配置：adminChatID 与 adminOpenIDs 只能二选一，不建议新部署使用。
 #   adminChatID  —— 指定一个飞书群（oc_ 开头），群内 @机器人 的消息都受理，群成员即管理员。
 #                   推荐：入职拉群、离职踢群，名单零维护。
 #   adminOpenIDs —— 管理员的 open_id 列表（ou_ 开头），这些用户的私聊消息才受理。
 # 注意：同一员工在不同租户中的 open_id 不同，切换租户时需换成对应租户的值。
-adminChatID = "oc_xxxxxxxx"
-# adminOpenIDs = ["ou_xxxxxxxx", "ou_yyyyyyyy"]
+# adminChatID = "oc_xxxxxxxx"
 
-# 「加白」不带有效期时的默认时长，支持 m/h/d，如 "30m"、"2h"、"3d"
-defaultTTL = "2h"
+# 「加白」不带有效期时默认 4h；员工授权最大 24h。
+defaultTTL = "4h"
+maxTTL = "24h"
+maxActiveIPs = 3
+# 一次性授权链接有效期
+linkTTL = "5m"
+workers = 4
+queueSize = 100
+requestsPerMinute = 10
+
+[server]
+# 建议仅监听本机，由 Nginx/Caddy 提供公网 HTTPS。
+listenAddr = "127.0.0.1:8080"
+publicBaseURL = "https://frps-access.example.com"
+# 只有反向代理地址在此列表中时，网关才信任 X-Forwarded-For。
+trustedProxyCIDRs = ["127.0.0.0/8"]
+# 如直接由网关提供 HTTPS，可同时配置以下两项：
+# tlsCertFile = "./cert.pem"
+# tlsKeyFile = "./key.pem"
+
+[storage]
+sqliteFile = "./data/frps-gateway.db"

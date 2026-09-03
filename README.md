@@ -2,30 +2,30 @@
 
 通过**飞书机器人**管理 frps IP 白名单的 sidecar 服务。
 
-管理员在飞书里给机器人发消息（如 `加白 1.2.3.4 2h`），本服务调用 frps 的管理 API
+员工在飞书里给机器人发消息（推荐 `加白当前IP`），机器人返回 5 分钟有效的一次性 HTTPS 链接；用户确认后，网关识别公网 IP、写入 SQLite，并调用 frps 管理 API
 更新白名单并回复确认；只有白名单内的来源 IP 才能访问 frps 映射的端口。
 
 ```
-飞书消息（管理员）
+飞书消息（员工） → 一次性 HTTPS 授权链接 → SQLite 用户授权
     │ WebSocket 长连接（官方 SDK，出站连接，无需公网地址）
     ▼
-frps-gateway ──HTTP + Basic Auth──▶ frps /api/v2/whitelist（内存白名单，连接时校验）
+frps-gateway ──HTTP + Basic Auth──▶ frps /api/v2/whitelist（持久化白名单，连接时校验）
 ```
 
-> frps 白名单存储和管理 API 已完成；业务连接拦截将在 Phase 3 接入。
-> 当前可以安全验证增删查，但尚不会拒绝非白名单连接。接口契约见 [`docs/api.md`](./docs/api.md)。
+> frps 白名单、飞书机器人、一次性链接和用户授权记录已经形成可运行闭环。公网 HTTPS 证书、真实飞书凭据、云防火墙及反向代理仍属于部署工作。
 
 ## 指令
 
 | 指令 | 别名 | 说明 |
 |---|---|---|
+| `加白当前IP` | `授权当前IP` | 返回一次性链接，自动识别公网 IP（推荐） |
 | `加白 1.2.3.4` | `add` | 加入白名单，有效期用配置的 `defaultTTL` |
-| `加白 1.2.3.4 2h` | `add 1.2.3.4 2h` | 指定有效期，支持 `30m` / `2h` / `3d`（可组合如 `1d12h`） |
-| `删白 1.2.3.4` | `remove` / `del` | 移除条目 |
-| `白名单` | `list` / `ls` | 列出全部条目及剩余有效期 |
+| `加白 1.2.3.4 2h` | `add 1.2.3.4 2h` | 指定有效期，最大 24h（可组合如 `12h30m`） |
+| `删白 1.2.3.4` | `remove` / `del` | 撤销本人的授权；其他用户对同一 IP 的授权不受影响 |
+| `白名单` | `list` / `ls` | 列出本人有效授权 |
 | `帮助` | `help` | 用法说明 |
 
-管理员鉴权（配置二选一）：
+生产模式建议 `allowAllUsers = true`，并在飞书开放平台将应用可用范围限制为公司成员；群聊默认必须 @机器人。`adminOpenIDs` 预留给全量管理功能。
 
 - `adminChatID`：指定一个飞书群，群内 @机器人 的消息都受理，**群成员即管理员**（推荐，入职拉群、离职踢群）；
 - `adminOpenIDs`：仅受理这些用户（`ou_` 开头）的私聊消息。
@@ -78,10 +78,15 @@ cp bot.toml.example bot.toml
 |---|---|
 | `[frps] apiAddr/user/password` | frps webServer 地址与 Basic Auth 账号 |
 | `[feishu] appID/appSecret` | 飞书自建应用凭证 |
-| `[bot] adminChatID` / `adminOpenIDs` | 管理员鉴权，二选一 |
+| `[bot] allowAllUsers/adminOpenIDs` | 员工使用开关与管理员名单 |
 | `[bot] defaultTTL` | `加白` 不带时长时的默认有效期 |
+| `[bot] maxTTL/maxActiveIPs` | gateway 强制的 24h 上限和每人 3 个有效 IP 上限 |
+| `[bot] enabled` | 紧急停用飞书长连接；不影响授权页处理已有链接 |
+| `[server]` | 授权页监听地址、HTTPS 公网地址及可信反向代理 |
+| `[storage] sqliteFile` | 用户授权、一次性令牌及消息幂等数据库 |
 
 `bot.toml` 含密钥，已在 `.gitignore` 中忽略。
+生产环境推荐通过 `passwordEnv` / `passwordFile` 和 `appSecretEnv` / `appSecretFile` 外置密钥，避免把明文放进 TOML。完整上线和回滚步骤见 [`docs/deployment-runbook.md`](./docs/deployment-runbook.md)。
 
 ## 开发
 
@@ -90,8 +95,7 @@ go test ./...
 go vet ./...
 ```
 
-包结构：`config`（配置加载）、`duration`（d/h/m/s 时长解析）、`command`（指令解析）、
-`interaction`（操作者和消息上下文）、`frps`（frps API 客户端）、`executor`（指令执行与回复文案）、`feishu`（长连接与消息处理）。
+包结构还包括 `store`（SQLite 授权和幂等）、`authorize`（一次性 HTTPS 授权页与可信代理解析）。
 
 ## 项目文档
 
@@ -99,3 +103,5 @@ go vet ./...
 - [`ROADMAP.md`](./ROADMAP.md)：进度、阶段任务和完成标准
 - [`docs/api.md`](./docs/api.md)：frps 白名单 API 契约
 - [`docs/ip-whitelist-requirements.md`](./docs/ip-whitelist-requirements.md)：详细需求与验收标准
+- [`docs/whitelist-review-2026-09-03.md`](./docs/whitelist-review-2026-09-03.md)：最近五个 frp 提交的专项审查与修复记录
+- [`docs/security-audit-2026-09-03.md`](./docs/security-audit-2026-09-03.md)：frps-gateway、发布配置、依赖和内网穿透暴露面的安全审计

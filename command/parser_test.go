@@ -35,6 +35,7 @@ func TestParse(t *testing.T) {
 		{"remove missing ip", "删白", ActionHelp, "", 0, true},
 		{"remove bad ip", "删白 foo", ActionHelp, "", 0, true},
 		{"list", "白名单", ActionList, "", 0, false},
+		{"list mine", "我的白名单", ActionList, "", 0, false},
 		{"list english", "list", ActionList, "", 0, false},
 		{"list ls", "ls", ActionList, "", 0, false},
 		{"help", "帮助", ActionHelp, "", 0, false},

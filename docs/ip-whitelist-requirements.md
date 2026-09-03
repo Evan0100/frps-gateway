@@ -32,7 +32,7 @@ frps 管理 API（HTTP + Basic Auth，本机/内网调用）
     POST/GET/DELETE  /api/v2/whitelist
     │
     ▼
-frps 内存白名单 { IP → 过期时间 }（后台协程定期清理过期条目）
+frps 持久化白名单 { IP → 过期时间、访问时段、操作元数据 }（后台协程定期清理过期条目）
     ▲
     │ 每个用户连接进入时校验来源 IP
 frps 连接处理汇聚点 GetWorkConnFromPool（server/proxy/proxy.go）

@@ -1,8 +1,20 @@
 # frps Whitelist API
 
+## frps-gateway 用户授权 HTTP 契约
+
+| 方法 | 路径 | 鉴权 | 说明 |
+|---|---|---|---|
+| `GET` | `/healthz` | 无 | 健康检查，返回 `200 ok` |
+| `GET` | `/authorize/{token}` | 一次性令牌 | 显示检测到的公网 IP 和确认页 |
+| `POST` | `/authorize/{token}` | 一次性令牌 | 原子消费令牌、记录用户授权并同步 frps |
+
+令牌为 32 字节加密随机数，SQLite 仅保存 SHA-256；默认 5 分钟过期且只能成功消费一次。GET 与 POST 对无效、过期或重复使用的令牌统一返回 `410 Gone`。每名员工默认最多保留 3 个不同的有效 IP；刷新已有 IP 不占新名额，超限返回 `409 Conflict`，并且不会消费令牌。只有直接连接来自 `server.trustedProxyCIDRs` 时才解析 `X-Forwarded-For`，否则使用 TCP 对端地址。数据库已写入但 frps 同步失败返回 `502`，启动对账会再次应用有效授权。
+
+员工授权只提交 TTL，不提交访问时段。同一公网 IP 有多个员工授权时，frps 条目的到期时间取所有有效 grant 的最大值；管理员直接在 frps 设置的访问时段是该 IP 的全局策略，gateway 刷新 TTL 时省略 `windows`，因此不会覆盖该策略。
+
 ## Overview
 
-白名单接口属于 frps dashboard API v2，由 frps 实现，`frps-gateway` 作为调用方。接口只管理当前生效的 `IP + expireAt`；飞书用户、申请和审计数据不进入 frps。
+白名单接口属于 frps dashboard API v2，由 frps 实现，`frps-gateway` 作为调用方。frps 保存当前生效条目、操作账号元数据和最近 5000 次成功变更；飞书用户、申请上下文和长期审计仍由 gateway 负责。
 
 | Module | Method | Path | Summary | Auth | Status | Updated |
 |---|---|---|---|---|---|---|
@@ -11,8 +23,9 @@
 | Whitelist | POST | `/api/v2/whitelist` | 添加 IP 或刷新有效期,可选设置访问时段 | Basic Auth | Modified | 2026-09-03 |
 | Whitelist | GET | `/api/v2/whitelist/status` | 查询拦截开关、默认 TTL 和服务器时间 | Basic Auth | Modified | 2026-09-03 |
 | Whitelist | GET | `/api/v2/whitelist/accesslog` | 查询访问记录(放行/拒绝及原因) | Basic Auth | Added | 2026-09-03 |
+| Whitelist | GET | `/api/v2/whitelist/auditlog` | 查询持久化的白名单变更审计 | Basic Auth | Added | 2026-09-03 |
 
-三个管理接口已在 frps 中实现并完成自动化测试;自 Phase 3 起 `whitelist.enabled = true` 即在连接入口执行拦截。frps 同时在 `GET /whitelist` 内置了一个使用这些接口的管理页面(同一 Basic Auth)。
+六个白名单接口已在 frps 中实现并完成自动化测试；`whitelist.enabled = true` 时在连接入口执行拦截。frps 同时在 `GET /whitelist` 内置了使用这些接口的管理页面（同一 Basic Auth）。
 
 ## Enforcement
 
@@ -24,8 +37,10 @@
 
 ## Common Behavior
 
-- 管理 API 复用 `webServer.user` 和 `webServer.password` 的 Basic Auth。
+- 管理 API 复用 `webServer.user` 和 `webServer.password` 的 Basic Auth；启用白名单时缺少 webServer 端口、用户名、密码或 `whitelist.storageFile` 会导致配置校验失败。
+- `POST` 与 `DELETE` 请求体最大 16 KiB，只允许一个 JSON 值并拒绝未知字段；超限返回 `413`，其他 JSON 结构错误返回 `400`。
 - 生产环境只允许通过本机回环地址或受控管理内网访问，远程访问必须使用 HTTPS 或安全隧道。
+- 当前名单和最近 5000 次成功变更原子写入 `whitelist.storageFile`，frps 重启时恢复未过期条目。
 - IPv4 和 IPv6 必须标准化后存储；重复添加同一 IP 会刷新过期时间。
 - `expireAt` 为 Unix 秒时间戳。
 - GET 只返回未过期条目，并按标准化 IP 字符串升序排序。
@@ -54,6 +69,9 @@ Basic Auth 失败由 frps 现有中间件直接返回 HTTP 401 和纯文本 `Una
 | 2026-09-03 | Added | GET | `/api/v2/whitelist/status` | 暴露 `whitelist.enabled` 与默认 TTL,供管理页面和管理端展示拦截状态 |
 | 2026-09-03 | Modified | GET/POST | `/api/v2/whitelist` | 条目支持可选访问时段 `windows`(星期 + 时段);status 增加 `serverTime` |
 | 2026-09-03 | Added | GET | `/api/v2/whitelist/accesslog` | 查询内存访问记录(环形缓冲,重启清空),支持按结果和 IP 过滤 |
+| 2026-09-03 | Changed | GET/POST/DELETE | `/api/v2/whitelist` | 增加跨重启持久化、操作账号/来源元数据和服务端计算的 `allowedNow` |
+| 2026-09-03 | Changed | GET | `/api/v2/whitelist/status` | 增加 RFC3339 时间、UTC 偏移和访问日志启用状态 |
+| 2026-09-03 | Added | GET | `/api/v2/whitelist/auditlog` | 查询持久化的成功增删/延期记录 |
 
 ## Whitelist
 
@@ -81,6 +99,12 @@ Basic Auth 失败由 frps 现有中间件直接返回 HTTP 401 和纯文本 `Una
     {
       "ip": "1.2.3.4",
       "expireAt": 1788350400,
+      "allowedNow": true,
+      "createdAt": 1788343200,
+      "updatedAt": 1788343200,
+      "createdBy": "admin",
+      "updatedBy": "admin",
+      "updatedFrom": "127.0.0.1",
       "windows": [
         { "days": [1, 2, 3, 4, 5], "start": "09:00", "end": "18:00" }
       ]
@@ -89,7 +113,7 @@ Basic Auth 失败由 frps 现有中间件直接返回 HTTP 401 和纯文本 `Una
 }
 ```
 
-`windows` 为空或省略表示全天可访问。`days` 为 ISO 星期编号,1=周一…7=周日;`start`/`end` 为 `HH:MM`(服务器本地时间),`start > end` 表示跨午夜(如 22:00–06:00);区间为半开 `[start, end)`,即到点即拒。
+`allowedNow` 是 frps 按服务器当前时间计算的实际访问状态。`createdBy`/`updatedBy` 是 Basic Auth 管理账号，`updatedFrom` 是管理请求来源 IP。`windows` 为空或省略表示全天可访问。`days` 为 ISO 星期编号,1=周一…7=周日;`start`/`end` 为 `HH:MM`(服务器本地时间),`start > end` 表示跨午夜(如 22:00–06:00);区间为半开 `[start, end)`,即到点即拒。
 
 #### Error Responses
 
@@ -148,6 +172,12 @@ Basic Auth 失败由 frps 现有中间件直接返回 HTTP 401 和纯文本 `Una
   "data": {
     "ip": "1.2.3.4",
     "expireAt": 1788350400,
+    "allowedNow": true,
+    "createdAt": 1788343200,
+    "updatedAt": 1788343200,
+    "createdBy": "admin",
+    "updatedBy": "admin",
+    "updatedFrom": "127.0.0.1",
     "windows": [
       { "days": [1, 2, 3, 4, 5], "start": "09:00", "end": "18:00" }
     ]
@@ -231,12 +261,16 @@ Basic Auth 失败由 frps 现有中间件直接返回 HTTP 401 和纯文本 `Una
   "data": {
     "enabled": true,
     "defaultTTL": "2h0m0s",
-    "serverTime": 1788399316
+    "serverTime": 1788399316,
+    "serverTimeRFC3339": "2026-09-03T16:15:16+08:00",
+    "serverUTCOffset": 28800,
+    "accessLogEnabled": true,
+    "accessLogSize": 5000
   }
 }
 ```
 
-`defaultTTL` 为 Go `time.Duration` 字符串形式;`serverTime` 为服务器当前时间的 Unix 秒,管理页面用它计算时段内外状态,避免浏览器时区与服务器不一致造成误判。该接口为纯只读查询,用于管理页面和管理端展示当前拦截状态,避免在 `whitelist.enabled = false` 时误以为拦截已生效。
+`defaultTTL` 为 Go `time.Duration` 字符串形式；`serverTimeRFC3339` 和 `serverUTCOffset` 明确服务器墙上时间与时区。列表中的 `allowedNow` 由服务端计算，页面不再依赖浏览器时区猜测。`accessLogEnabled`/`accessLogSize` 用于区分“暂无记录”和“记录已关闭”。
 
 #### Error Responses
 
@@ -261,7 +295,7 @@ Basic Auth 失败由 frps 现有中间件直接返回 HTTP 401 和纯文本 `Una
 |---|---|---|---|
 | `action` | string | No | `allow` 或 `deny`;省略返回全部 |
 | `ip` | string | No | 按来源 IP 大小写不敏感子串匹配 |
-| `limit` | int | No | 返回条数上限,默认 200 |
+| `limit` | int | No | 返回条数上限,默认 200,最大 5000 |
 
 #### Success Response
 
@@ -295,14 +329,60 @@ Basic Auth 失败由 frps 现有中间件直接返回 HTTP 401 和纯文本 `Una
 | `action` | `allow`(放行)/ `deny`(拒绝) |
 | `reason` | `whitelisted`(名单内放行)/ `not_in_whitelist`(不在名单或名单为空)/ `expired`(条目已过期)/ `outside_time_window`(时段外) |
 
-存储为内存环形缓冲(容量 `whitelist.accessLogSize`,默认 5000,负数关闭记录),frps 重启后清空;持久化审计属 Phase 4 gateway 层职责。TCP 族在连接建立时记录;HTTP vhost 每个请求记录(不含 URL path)。
+存储为内存环形缓冲(容量 `whitelist.accessLogSize`,默认 5000,负数关闭记录),frps 重启后清空。关闭时接口返回 HTTP 200 和空数组。它属于运行访问记录，不作为白名单变更审计；持久化变更见 `/api/v2/whitelist/auditlog`。TCP 族在连接建立时记录;HTTP vhost 每个请求记录(不含 URL path)。
 
 #### Error Responses
 
 | Status | Code | Message | Reason |
 |---|---:|---|---|
 | 400 | 400 | `invalid action` | action 不是 allow/deny |
-| 400 | 400 | `invalid limit` | limit 非数字或负数 |
+| 400 | 400 | `invalid limit` | limit 非数字、负数或大于 5000 |
+| 401 | - | `Unauthorized` | Basic Auth 缺失或错误 |
+
+### GET /api/v2/whitelist/auditlog
+
+**Summary:** 查询持久化的白名单成功变更记录，最新记录在前
+
+**Auth:** Basic Auth required
+
+**Status:** Added
+
+**Updated:** 2026-09-03
+
+#### Query Parameters
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `limit` | int | No | 返回条数上限，默认 200，最大 5000 |
+
+#### Success Response
+
+```json
+{
+  "code": 200,
+  "msg": "success",
+  "data": [
+    {
+      "sequence": 12,
+      "time": 1788399316,
+      "operation": "extend",
+      "ip": "1.2.3.4",
+      "operator": "admin",
+      "remoteAddr": "127.0.0.1",
+      "expireAt": 1788406516,
+      "windows": []
+    }
+  ]
+}
+```
+
+`operation` 为 `add`、`extend` 或 `remove`。审计与白名单状态在同一文件内原子更新，默认保留最近 5000 次成功操作。Basic Auth 当前只有一个配置账号，因此 `operator` 表示管理账号；飞书用户身份仍由后续 gateway 长期审计关联。
+
+#### Error Responses
+
+| Status | Code | Message | Reason |
+|---|---:|---|---|
+| 400 | 400 | `invalid limit` | limit 非数字、负数或大于 5000 |
 | 401 | - | `Unauthorized` | Basic Auth 缺失或错误 |
 
 ## Test Method
@@ -322,6 +402,8 @@ curl -u admin:password \
   http://127.0.0.1:7500/api/v2/whitelist
 
 curl -u admin:password http://127.0.0.1:7500/api/v2/whitelist/status
+
+curl -u admin:password "http://127.0.0.1:7500/api/v2/whitelist/auditlog?limit=200"
 ```
 
 服务端自动化测试必须覆盖成功、无鉴权、错误鉴权、非法 JSON、非法 IP、非法 TTL、重复添加刷新和删除不存在条目；拦截行为另由 e2e 测试覆盖默认拒绝、加白放行、过期失效和关闭开关回退。

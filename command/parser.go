@@ -14,18 +14,20 @@ import (
 type Action string
 
 const (
-	ActionAdd    Action = "add"
-	ActionRemove Action = "remove"
-	ActionList   Action = "list"
-	ActionHelp   Action = "help"
+	ActionAdd       Action = "add"
+	ActionRemove    Action = "remove"
+	ActionList      Action = "list"
+	ActionHelp      Action = "help"
+	ActionAuthorize Action = "authorize"
 )
 
 // Long aliases first so e.g. "list..." is not split by "ls".
 var (
-	addAliases    = []string{"加白", "添加", "add"}
-	removeAliases = []string{"删白", "删除", "remove", "del"}
-	listAliases   = []string{"白名单", "列表", "list", "ls"}
-	helpAliases   = []string{"帮助", "help", "?", "？"}
+	addAliases       = []string{"加白", "添加", "add"}
+	removeAliases    = []string{"删白", "删除", "remove", "del"}
+	listAliases      = []string{"我的白名单", "白名单", "列表", "list", "ls"}
+	helpAliases      = []string{"帮助", "help", "?", "？"}
+	authorizeAliases = []string{"加白当前ip", "授权当前ip", "authorize"}
 
 	// feishu renders @mentions inside text as @_user_1 placeholders
 	mentionPattern = regexp.MustCompile(`@_user_\d+`)
@@ -35,9 +37,10 @@ var (
 
 // Usage is the help text replied for unknown or malformed instructions.
 const Usage = `可用指令：
-  加白 <IP> [有效期]   添加 IP 到白名单，有效期如 30m / 2h / 3d，缺省用默认值
-  删白 <IP>            从白名单移除 IP
-  白名单               查看当前白名单及剩余有效期
+  加白当前IP           生成一次性链接，自动识别你的公网 IP（推荐）
+  加白 <IP> [有效期]   添加 IP 到你自己的授权记录
+  删白 <IP>            撤销你对该 IP 的授权；其他人的授权不受影响
+  白名单               查看你自己的有效授权
 示例：加白 1.2.3.4 2h`
 
 // Command is a parsed whitelist instruction.
@@ -58,6 +61,8 @@ func Parse(raw string) (*Command, error) {
 	}
 	head := strings.ToLower(fields[0])
 	switch {
+	case contains(authorizeAliases, head):
+		return &Command{Action: ActionAuthorize}, nil
 	case contains(addAliases, head):
 		return parseAdd(fields[1:])
 	case contains(removeAliases, head):
