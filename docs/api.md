@@ -10,6 +10,7 @@
 | Whitelist | GET | `/api/v2/whitelist` | 查询当前生效条目 | Basic Auth | Added | 2026-09-02 |
 | Whitelist | POST | `/api/v2/whitelist` | 添加 IP 或刷新有效期,可选设置访问时段 | Basic Auth | Modified | 2026-09-03 |
 | Whitelist | GET | `/api/v2/whitelist/status` | 查询拦截开关、默认 TTL 和服务器时间 | Basic Auth | Modified | 2026-09-03 |
+| Whitelist | GET | `/api/v2/whitelist/accesslog` | 查询访问记录(放行/拒绝及原因) | Basic Auth | Added | 2026-09-03 |
 
 三个管理接口已在 frps 中实现并完成自动化测试;自 Phase 3 起 `whitelist.enabled = true` 即在连接入口执行拦截。frps 同时在 `GET /whitelist` 内置了一个使用这些接口的管理页面(同一 Basic Auth)。
 
@@ -52,6 +53,7 @@ Basic Auth 失败由 frps 现有中间件直接返回 HTTP 401 和纯文本 `Una
 | 2026-09-02 | Added | POST | `/api/v2/whitelist` | 实现添加、TTL 默认值和重复刷新 |
 | 2026-09-03 | Added | GET | `/api/v2/whitelist/status` | 暴露 `whitelist.enabled` 与默认 TTL,供管理页面和管理端展示拦截状态 |
 | 2026-09-03 | Modified | GET/POST | `/api/v2/whitelist` | 条目支持可选访问时段 `windows`(星期 + 时段);status 增加 `serverTime` |
+| 2026-09-03 | Added | GET | `/api/v2/whitelist/accesslog` | 查询内存访问记录(环形缓冲,重启清空),支持按结果和 IP 过滤 |
 
 ## Whitelist
 
@@ -242,6 +244,66 @@ Basic Auth 失败由 frps 现有中间件直接返回 HTTP 401 和纯文本 `Una
 |---|---:|---|---|
 | 401 | - | `Unauthorized` | Basic Auth 缺失或错误 |
 | 500 | 500 | 实际内部错误 | 服务端内部错误 |
+
+### GET /api/v2/whitelist/accesslog
+
+**Summary:** 查询白名单访问记录(经白名单管控的每次访问,放行与拒绝都记录)
+
+**Auth:** Basic Auth required
+
+**Status:** Added
+
+**Updated:** 2026-09-03
+
+#### Query Parameters
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `action` | string | No | `allow` 或 `deny`;省略返回全部 |
+| `ip` | string | No | 按来源 IP 大小写不敏感子串匹配 |
+| `limit` | int | No | 返回条数上限,默认 200 |
+
+#### Success Response
+
+记录按时间倒序(最新在前):
+
+```json
+{
+  "code": 200,
+  "msg": "success",
+  "data": [
+    {
+      "time": 1788399316,
+      "ip": "198.51.100.7",
+      "user": "alice",
+      "source": "tcp/my-proxy",
+      "action": "deny",
+      "reason": "not_in_whitelist"
+    }
+  ]
+}
+```
+
+字段说明:
+
+| Field | Description |
+|---|---|
+| `time` | 记录时间的 Unix 秒(服务器时间) |
+| `ip` | 来源 IP(标准化后) |
+| `user` | 代理属主(frpc 登录用户);HTTP vhost 记录为空 |
+| `source` | 访问目标:`tcp/<代理名>` 或 `http/<域名>` |
+| `action` | `allow`(放行)/ `deny`(拒绝) |
+| `reason` | `whitelisted`(名单内放行)/ `not_in_whitelist`(不在名单或名单为空)/ `expired`(条目已过期)/ `outside_time_window`(时段外) |
+
+存储为内存环形缓冲(容量 `whitelist.accessLogSize`,默认 5000,负数关闭记录),frps 重启后清空;持久化审计属 Phase 4 gateway 层职责。TCP 族在连接建立时记录;HTTP vhost 每个请求记录(不含 URL path)。
+
+#### Error Responses
+
+| Status | Code | Message | Reason |
+|---|---:|---|---|
+| 400 | 400 | `invalid action` | action 不是 allow/deny |
+| 400 | 400 | `invalid limit` | limit 非数字或负数 |
+| 401 | - | `Unauthorized` | Basic Auth 缺失或错误 |
 
 ## Test Method
 
