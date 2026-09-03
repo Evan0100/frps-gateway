@@ -9,8 +9,16 @@
 | Whitelist | DELETE | `/api/v2/whitelist` | 删除一个 IP | Basic Auth | Added | 2026-09-02 |
 | Whitelist | GET | `/api/v2/whitelist` | 查询当前生效条目 | Basic Auth | Added | 2026-09-02 |
 | Whitelist | POST | `/api/v2/whitelist` | 添加 IP 或刷新有效期 | Basic Auth | Added | 2026-09-02 |
+| Whitelist | GET | `/api/v2/whitelist/status` | 查询拦截开关与默认 TTL | Basic Auth | Added | 2026-09-03 |
 
-三个接口已经在 frps 中实现并完成 Phase 2 自动化测试；连接拦截将在 Phase 3 接入。
+三个管理接口已在 frps 中实现并完成自动化测试；自 Phase 3 起 `whitelist.enabled = true` 即在连接入口执行拦截。frps 同时在 `GET /whitelist` 内置了一个使用这些接口的管理页面（同一 Basic Auth）。
+
+## Enforcement
+
+- `whitelist.enabled = false`（默认）时行为与原版 frps 完全一致，接口仍可用于预填名单。
+- `whitelist.enabled = true` 且名单为空时拒绝全部受支持的业务连接（fail-closed）。
+- 拦截点：TCP/HTTPS/TCPMux/STCP/SUDP visitor 连接在申请 work connection 之前拒绝；HTTP vhost 请求直接返回 403。
+- 不拦截：UDP/SUDP 按包来源、XTCP 打洞直连；STCP/SUDP visitor 连接上校验的是 visitor frpc 主机 IP 而非最终用户 IP。
 
 ## Common Behavior
 
@@ -41,6 +49,7 @@ Basic Auth 失败由 frps 现有中间件直接返回 HTTP 401 和纯文本 `Una
 | 2026-09-02 | Added | DELETE | `/api/v2/whitelist` | 实现删除接口和 400/401/404 错误行为 |
 | 2026-09-02 | Added | GET | `/api/v2/whitelist` | 实现未过期条目查询和稳定排序 |
 | 2026-09-02 | Added | POST | `/api/v2/whitelist` | 实现添加、TTL 默认值和重复刷新 |
+| 2026-09-03 | Added | GET | `/api/v2/whitelist/status` | 暴露 `whitelist.enabled` 与默认 TTL，供管理页面和管理端展示拦截状态 |
 
 ## Whitelist
 
@@ -171,6 +180,42 @@ Basic Auth 失败由 frps 现有中间件直接返回 HTTP 401 和纯文本 `Una
 | 404 | 404 | `whitelist entry not found` | IP 当前不在白名单中 |
 | 500 | 500 | 实际内部错误 | 服务端内部错误 |
 
+### GET /api/v2/whitelist/status
+
+**Summary:** 查询连接拦截是否开启以及服务端默认 TTL
+
+**Auth:** Basic Auth required
+
+**Status:** Added
+
+**Updated:** 2026-09-03
+
+#### Success Response
+
+| Status | Description |
+|---|---|
+| 200 | 返回拦截开关和默认 TTL |
+
+```json
+{
+  "code": 200,
+  "msg": "success",
+  "data": {
+    "enabled": true,
+    "defaultTTL": "2h0m0s"
+  }
+}
+```
+
+`defaultTTL` 为 Go `time.Duration` 字符串形式。该接口为纯只读查询，用于管理页面和管理端展示当前拦截状态，避免在 `whitelist.enabled = false` 时误以为拦截已生效。
+
+#### Error Responses
+
+| Status | Code | Message | Reason |
+|---|---:|---|---|
+| 401 | - | `Unauthorized` | Basic Auth 缺失或错误 |
+| 500 | 500 | 实际内部错误 | 服务端内部错误 |
+
 ## Test Method
 
 ```bash
@@ -186,6 +231,8 @@ curl -u admin:password \
   -H "Content-Type: application/json" \
   -d '{"ip":"1.2.3.4"}' \
   http://127.0.0.1:7500/api/v2/whitelist
+
+curl -u admin:password http://127.0.0.1:7500/api/v2/whitelist/status
 ```
 
-服务端自动化测试必须覆盖成功、无鉴权、错误鉴权、非法 JSON、非法 IP、非法 TTL、重复添加刷新和删除不存在条目。
+服务端自动化测试必须覆盖成功、无鉴权、错误鉴权、非法 JSON、非法 IP、非法 TTL、重复添加刷新和删除不存在条目；拦截行为另由 e2e 测试覆盖默认拒绝、加白放行、过期失效和关闭开关回退。
