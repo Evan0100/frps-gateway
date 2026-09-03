@@ -35,7 +35,9 @@ CREATE TABLE IF NOT EXISTS grants(id INTEGER PRIMARY KEY, open_id TEXT NOT NULL,
 CREATE INDEX IF NOT EXISTS grants_active_ip ON grants(ip, expire_at, revoked_at);
 CREATE INDEX IF NOT EXISTS grants_user ON grants(open_id, expire_at, revoked_at);
 CREATE TABLE IF NOT EXISTS auth_tokens(token_hash BLOB PRIMARY KEY, open_id TEXT NOT NULL, operator_name TEXT NOT NULL DEFAULT '', message_id TEXT NOT NULL UNIQUE, ttl_seconds INTEGER NOT NULL, expires_at INTEGER NOT NULL, used_at INTEGER);
-CREATE TABLE IF NOT EXISTS managed_ips(ip TEXT PRIMARY KEY);`); err != nil {
+CREATE TABLE IF NOT EXISTS managed_ips(ip TEXT PRIMARY KEY);
+CREATE TABLE IF NOT EXISTS access_records(instance TEXT NOT NULL, seq INTEGER NOT NULL, time INTEGER NOT NULL, ip TEXT NOT NULL, user TEXT NOT NULL DEFAULT '', source TEXT NOT NULL, action TEXT NOT NULL, reason TEXT NOT NULL, PRIMARY KEY(instance, seq));
+CREATE INDEX IF NOT EXISTS access_records_time ON access_records(time);`); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("migrate sqlite: %w", err)
 	}
@@ -196,4 +198,66 @@ func (s *Store) list(ctx context.Context, where string, args ...any) ([]Grant, e
 		out = append(out, g)
 	}
 	return out, rows.Err()
+}
+
+// AccessRecord is one whitelist enforcement decision shipped from frps.
+type AccessRecord struct {
+	Instance string
+	Seq      uint64
+	Time     int64
+	IP       string
+	User     string
+	Source   string
+	Action   string
+	Reason   string
+}
+
+// InsertAccessRecords stores records in one transaction. Records already
+// present (same instance and seq) are skipped; the return value is the
+// number of newly stored rows.
+func (s *Store) InsertAccessRecords(ctx context.Context, records []AccessRecord) (int64, error) {
+	if len(records) == 0 {
+		return 0, nil
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	stmt, err := tx.PrepareContext(ctx, `INSERT OR IGNORE INTO access_records(instance,seq,time,ip,user,source,action,reason) VALUES(?,?,?,?,?,?,?,?)`)
+	if err != nil {
+		return 0, err
+	}
+	defer stmt.Close()
+	var inserted int64
+	for _, rec := range records {
+		res, err := stmt.ExecContext(ctx, rec.Instance, rec.Seq, rec.Time, rec.IP, rec.User, rec.Source, rec.Action, rec.Reason)
+		if err != nil {
+			return inserted, err
+		}
+		if n, err := res.RowsAffected(); err == nil {
+			inserted += n
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return inserted, nil
+}
+
+// PruneAccessRecords deletes access records older than before and returns
+// the number of removed rows.
+func (s *Store) PruneAccessRecords(ctx context.Context, before time.Time) (int64, error) {
+	res, err := s.db.ExecContext(ctx, `DELETE FROM access_records WHERE time<?`, before.Unix())
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
+// CountAccessRecords returns the total number of stored access records.
+func (s *Store) CountAccessRecords(ctx context.Context) (int64, error) {
+	var n int64
+	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM access_records`).Scan(&n)
+	return n, err
 }

@@ -20,7 +20,22 @@ type Config struct {
 	Bot     Bot     `toml:"bot"`
 	Server  Server  `toml:"server"`
 	Storage Storage `toml:"storage"`
+	Ingest  Ingest  `toml:"ingest"`
 }
+
+// Ingest controls shipping frps access records into SQLite.
+type Ingest struct {
+	Enabled       *bool  `toml:"enabled"`
+	Interval      string `toml:"interval"`
+	RetentionDays int    `toml:"retentionDays"`
+
+	interval time.Duration
+}
+
+func (i *Ingest) IsEnabled() bool { return i.Enabled == nil || *i.Enabled }
+
+// IntervalDuration returns the poll interval; valid after Load.
+func (i *Ingest) IntervalDuration() time.Duration { return i.interval }
 
 type Frps struct {
 	ApiAddr      string `toml:"apiAddr"`
@@ -167,6 +182,17 @@ func (c *Config) validate() error {
 	}
 	if c.Storage.SQLiteFile == "" {
 		c.Storage.SQLiteFile = "./frps-gateway.db"
+	}
+	if c.Ingest.Interval == "" {
+		c.Ingest.Interval = "5s"
+	}
+	interval, err := time.ParseDuration(c.Ingest.Interval)
+	if err != nil || interval <= 0 {
+		return fmt.Errorf("config error: ingest.interval must be a positive duration like \"5s\" or \"1m\"")
+	}
+	c.Ingest.interval = interval
+	if c.Ingest.RetentionDays == 0 {
+		c.Ingest.RetentionDays = 30
 	}
 	return nil
 }

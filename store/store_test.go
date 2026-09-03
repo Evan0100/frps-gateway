@@ -80,3 +80,48 @@ func TestMessageIdempotency(t *testing.T) {
 		t.Fatalf("%q %v %v", v, ok, err)
 	}
 }
+
+func TestAccessRecordsInsertDedupAndPrune(t *testing.T) {
+	s, err := Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	ctx := context.Background()
+
+	batch := []AccessRecord{
+		{Instance: "boot1", Seq: 1, Time: 1000, IP: "192.0.2.1", User: "alice", Source: "tcp/p1", Action: "allow", Reason: "whitelisted"},
+		{Instance: "boot1", Seq: 2, Time: 1001, IP: "198.51.100.7", Source: "http/example.com", Action: "deny", Reason: "not_in_whitelist"},
+		{Instance: "boot1", Seq: 3, Time: 1002, IP: "192.0.2.1", Source: "tcp/p1", Action: "deny", Reason: "outside_time_window"},
+	}
+	inserted, err := s.InsertAccessRecords(ctx, batch)
+	if err != nil || inserted != 3 {
+		t.Fatalf("first insert = %d, %v", inserted, err)
+	}
+
+	// Re-polling the same page must not duplicate rows.
+	inserted, err = s.InsertAccessRecords(ctx, batch)
+	if err != nil || inserted != 0 {
+		t.Fatalf("reinsert = %d, %v", inserted, err)
+	}
+
+	// A frps restart produces a new instance; same seq values coexist.
+	restart := []AccessRecord{
+		{Instance: "boot2", Seq: 1, Time: 2000, IP: "192.0.2.1", Source: "tcp/p1", Action: "allow", Reason: "whitelisted"},
+	}
+	if inserted, err = s.InsertAccessRecords(ctx, restart); err != nil || inserted != 1 {
+		t.Fatalf("restart insert = %d, %v", inserted, err)
+	}
+
+	if n, err := s.CountAccessRecords(ctx); err != nil || n != 4 {
+		t.Fatalf("count = %d, %v", n, err)
+	}
+
+	// Pruning removes only records older than the cutoff.
+	if removed, err := s.PruneAccessRecords(ctx, time.Unix(1500, 0)); err != nil || removed != 3 {
+		t.Fatalf("prune = %d, %v", removed, err)
+	}
+	if n, err := s.CountAccessRecords(ctx); err != nil || n != 1 {
+		t.Fatalf("count after prune = %d, %v", n, err)
+	}
+}

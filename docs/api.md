@@ -307,6 +307,8 @@ Basic Auth 失败由 frps 现有中间件直接返回 HTTP 401 和纯文本 `Una
   "msg": "success",
   "data": [
     {
+      "instance": "9f86d081884c7d65",
+      "seq": 42,
       "time": 1788399316,
       "ip": "198.51.100.7",
       "user": "alice",
@@ -322,6 +324,8 @@ Basic Auth 失败由 frps 现有中间件直接返回 HTTP 401 和纯文本 `Una
 
 | Field | Description |
 |---|---|
+| `instance` | 产生记录的 frps 进程标识(每次重启重新生成),与 `seq` 联合唯一 |
+| `seq` | 进程内单调递增序号;日志采集方按 `(instance, seq)` 去重,可安全重复拉取 |
 | `time` | 记录时间的 Unix 秒(服务器时间) |
 | `ip` | 来源 IP(标准化后) |
 | `user` | 代理属主(frpc 登录用户);HTTP vhost 记录为空 |

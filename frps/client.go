@@ -76,7 +76,43 @@ func (c *Client) Remove(ctx context.Context, ip string) error {
 	return c.do(ctx, http.MethodDelete, "/api/v2/whitelist", body, nil)
 }
 
+// AccessRecord is one whitelist enforcement decision reported by frps.
+// Instance and Seq together identify a record across frps restarts.
+type AccessRecord struct {
+	Instance string `json:"instance"`
+	Seq      uint64 `json:"seq"`
+	Time     int64  `json:"time"`
+	IP       string `json:"ip"`
+	User     string `json:"user,omitempty"`
+	Source   string `json:"source"`
+	Action   string `json:"action"`
+	Reason   string `json:"reason"`
+}
+
+// ListAccessLog returns up to limit recent access records, newest first.
+// limit is clamped to frps's accepted range (0-5000).
+func (c *Client) ListAccessLog(ctx context.Context, limit int) ([]AccessRecord, error) {
+	if limit < 0 {
+		limit = 0
+	}
+	if limit > 5000 {
+		limit = 5000
+	}
+	var records []AccessRecord
+	// The default 1 MiB response cap is too small for a full page of
+	// records, so this endpoint allows a larger body.
+	path := fmt.Sprintf("/api/v2/whitelist/accesslog?limit=%d", limit)
+	if err := c.doLimit(ctx, http.MethodGet, path, nil, &records, 8<<20); err != nil {
+		return nil, err
+	}
+	return records, nil
+}
+
 func (c *Client) do(ctx context.Context, method, path string, body any, out any) error {
+	return c.doLimit(ctx, method, path, body, out, 1<<20)
+}
+
+func (c *Client) doLimit(ctx context.Context, method, path string, body any, out any, maxBytes int64) error {
 	var rd io.Reader
 	if body != nil {
 		buf, err := json.Marshal(body)
@@ -98,7 +134,7 @@ func (c *Client) do(ctx context.Context, method, path string, body any, out any)
 		return err
 	}
 	defer resp.Body.Close()
-	data, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxBytes))
 	if err != nil {
 		return err
 	}

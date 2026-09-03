@@ -59,3 +59,13 @@ trustedProxyCIDRs = ["127.0.0.0/8"]
 
 [storage]
 sqliteFile = "./data/frps-gateway.db"
+
+[ingest]
+# 定期把 frps 的访问记录(放行/拒绝)拉取入库,重启不丢、可长期追溯。
+# 关闭后访问记录只存在于 frps 内存环形缓冲中,frps 重启即清空。
+enabled = true
+# 拉取间隔。间隔越大,gateway 停机期间丢记录的风险越高
+# (frps 内存环默认 5000 条,可同步调大 whitelist.accessLogSize)。
+interval = "5s"
+# 访问记录保留天数,过期由网关每小时清理一次;-1 表示永久保留。
+retentionDays = 30

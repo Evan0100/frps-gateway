@@ -16,6 +16,7 @@ import (
 	"frps-gateway/executor"
 	"frps-gateway/feishu"
 	"frps-gateway/frps"
+	"frps-gateway/ingest"
 	"frps-gateway/store"
 )
 
@@ -49,6 +50,15 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	if cfg.Ingest.IsEnabled() {
+		poller := ingest.New(client, st, cfg.Ingest.IntervalDuration(), cfg.Ingest.RetentionDays, logger)
+		go poller.Run(ctx)
+		logger.Info("access log ingest enabled",
+			"interval", cfg.Ingest.IntervalDuration().String(),
+			"retentionDays", cfg.Ingest.RetentionDays)
+	} else {
+		logger.Warn("access log ingest disabled; frps access records stay in memory only")
+	}
 	if err := exec.Reconcile(ctx); err != nil {
 		logger.Warn("initial whitelist reconciliation failed", "err", err)
 	}
