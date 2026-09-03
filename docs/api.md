@@ -5,10 +5,13 @@
 | 方法 | 路径 | 鉴权 | 说明 |
 |---|---|---|---|
 | `GET` | `/healthz` | 无 | 健康检查，返回 `200 ok` |
+| `GET` | `/readyz` | 无 | SQLite 可用且 frps 管理 API 可达时返回 `200 ready`，否则返回 `503` |
 | `GET` | `/authorize/{token}` | 一次性令牌 | 显示检测到的公网 IP 和确认页 |
 | `POST` | `/authorize/{token}` | 一次性令牌 | 原子消费令牌、记录用户授权并同步 frps |
 
-令牌为 32 字节加密随机数，SQLite 仅保存 SHA-256；默认 5 分钟过期且只能成功消费一次。GET 与 POST 对无效、过期或重复使用的令牌统一返回 `410 Gone`。每名员工默认最多保留 3 个不同的有效 IP；刷新已有 IP 不占新名额，超限返回 `409 Conflict`，并且不会消费令牌。只有直接连接来自 `server.trustedProxyCIDRs` 时才解析 `X-Forwarded-For`，否则使用 TCP 对端地址。数据库已写入但 frps 同步失败返回 `502`，启动对账会再次应用有效授权。
+令牌为 32 字节加密随机数，SQLite 仅保存 SHA-256；默认 5 分钟过期且只能成功消费一次。GET 与 POST 对无效、过期或重复使用的令牌统一返回 `410 Gone`。每名员工默认最多保留 3 个不同的有效 IP；刷新已有 IP 不占新名额，超限返回 `409 Conflict`，并且不会消费令牌。只有直接连接来自 `server.trustedProxyCIDRs` 时才解析 `X-Forwarded-For`，否则使用 TCP 对端地址。数据库已写入但 frps 同步失败返回 `502`；启动及每 30 秒一次的周期对账会再次应用有效授权。
+
+飞书事件先写入 SQLite inbox，落盘成功后才确认；重复事件按 message ID 去重，处理中断后会自动重试。回复采用 SQLite outbox：命令结果先持久化，再由后台发送；发送失败按指数退避重试，并使用由 message ID 派生的稳定 UUID 防止重试产生重复消息。`/healthz` 只表示进程存活；发布验收和监控应使用 `/readyz`，其检查超时为 3 秒。两个端点都不会暴露内部错误或凭据。
 
 员工授权只提交 TTL，不提交访问时段。同一公网 IP 有多个员工授权时，frps 条目的到期时间取所有有效 grant 的最大值；管理员直接在 frps 设置的访问时段是该 IP 的全局策略，gateway 刷新 TTL 时省略 `windows`，因此不会覆盖该策略。
 
@@ -72,6 +75,7 @@ Basic Auth 失败由 frps 现有中间件直接返回 HTTP 401 和纯文本 `Una
 | 2026-09-03 | Changed | GET/POST/DELETE | `/api/v2/whitelist` | 增加跨重启持久化、操作账号/来源元数据和服务端计算的 `allowedNow` |
 | 2026-09-03 | Changed | GET | `/api/v2/whitelist/status` | 增加 RFC3339 时间、UTC 偏移和访问日志启用状态 |
 | 2026-09-03 | Added | GET | `/api/v2/whitelist/auditlog` | 查询持久化的成功增删/延期记录 |
+| 2026-09-03 | Added | GET | `/readyz` | gateway SQLite 与 frps 管理链路就绪检查 |
 
 ## Whitelist
 
@@ -332,6 +336,10 @@ Basic Auth 失败由 frps 现有中间件直接返回 HTTP 401 和纯文本 `Una
 | `source` | 访问目标:`tcp/<代理名>` 或 `http/<域名>` |
 | `action` | `allow`(放行)/ `deny`(拒绝) |
 | `reason` | `whitelisted`(名单内放行)/ `not_in_whitelist`(不在名单或名单为空)/ `expired`(条目已过期)/ `outside_time_window`(时段外) |
+
+gateway 会拒绝 `instance` 为空或 `seq=0` 的访问记录，以防旧版 frps 与新版 gateway 混合部署时把多条记录折叠成同一个主键。必须先升级 frps，再启用 gateway 的 `ingest`。采集器重复拉取最近最多 5000 条并去重；轮询失败会记录错误，检测到序号断档时会告警。断档通常表示 frps 内存环在采集恢复前已经覆盖了部分记录，告警不能恢复已丢失的数据。
+
+gateway 对 frps API 响应实施大小上限；超过上限返回本地 `ErrResponseTooLarge`，不再将截断内容误报为普通 JSON 解码错误。
 
 存储为内存环形缓冲(容量 `whitelist.accessLogSize`,默认 5000,负数关闭记录),frps 重启后清空。关闭时接口返回 HTTP 200 和空数组。它属于运行访问记录，不作为白名单变更审计；持久化变更见 `/api/v2/whitelist/auditlog`。TCP 族在连接建立时记录;HTTP vhost 每个请求记录(不含 URL path)。
 

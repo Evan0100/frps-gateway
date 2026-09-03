@@ -25,6 +25,7 @@ type Executor struct {
 	defaultTTL, maxTTL, linkTTL time.Duration
 	logger                      *slog.Logger
 	messageMu                   sync.Mutex
+	reconcileMu                 sync.Mutex
 	maxActiveIPs                int
 }
 
@@ -171,6 +172,8 @@ func (e *Executor) authorize(ctx context.Context, r interaction.Request) string 
 	return "请在 " + duration.Format(e.linkTTL) + " 内打开此一次性链接（请勿转发）：\n" + link
 }
 func (e *Executor) Reconcile(ctx context.Context) error {
+	e.reconcileMu.Lock()
+	defer e.reconcileMu.Unlock()
 	if e.store == nil {
 		return nil
 	}
@@ -188,6 +191,40 @@ func (e *Executor) Reconcile(ctx context.Context) error {
 		if _, err = e.client.Add(ctx, ip, time.Until(x)); err != nil {
 			return fmt.Errorf("reconcile %s: %w", ip, err)
 		}
+	}
+	managed, err := e.store.ListManagedIPs(ctx)
+	if err != nil {
+		return fmt.Errorf("list managed IPs: %w", err)
+	}
+	for _, ip := range managed {
+		if _, active := m[ip]; active {
+			continue
+		}
+		err = e.client.Remove(ctx, ip)
+		var apiErr *frps.APIError
+		if errors.As(err, &apiErr) && apiErr.NotFound() {
+			err = nil
+		}
+		if err != nil {
+			return fmt.Errorf("remove stale managed IP %s: %w", ip, err)
+		}
+		if err = e.store.ForgetManagedIP(ctx, ip); err != nil {
+			return fmt.Errorf("forget managed IP %s: %w", ip, err)
+		}
+	}
+	return nil
+}
+
+// Ready verifies the durable store and the frps management API used by all
+// authorization paths.
+func (e *Executor) Ready(ctx context.Context) error {
+	if e.store != nil {
+		if err := e.store.Ping(ctx); err != nil {
+			return fmt.Errorf("sqlite: %w", err)
+		}
+	}
+	if _, err := e.client.List(ctx); err != nil {
+		return fmt.Errorf("frps API: %w", err)
 	}
 	return nil
 }

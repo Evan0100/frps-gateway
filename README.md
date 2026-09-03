@@ -25,7 +25,7 @@ frps-gateway ──HTTP + Basic Auth──▶ frps /api/v2/whitelist（持久化
 | `白名单` | `list` / `ls` | 列出本人有效授权 |
 | `帮助` | `help` | 用法说明 |
 
-生产模式建议 `allowAllUsers = true`，并在飞书开放平台将应用可用范围限制为公司成员；群聊默认必须 @机器人。`adminOpenIDs` 预留给全量管理功能。
+生产模式建议 `allowAllUsers = true`，并在飞书开放平台将应用可用范围限制为公司成员；同时配置公司 `tenantKey` 作为额外租户边界。群聊默认必须 @机器人，程序只接受 `mentioned_type=bot` 的提及。`adminOpenIDs` 预留给全量管理功能。
 
 - `adminChatID`：指定一个飞书群，群内 @机器人 的消息都受理，**群成员即管理员**（推荐，入职拉群、离职踢群）；
 - `adminOpenIDs`：仅受理这些用户（`ou_` 开头）的私聊消息。
@@ -77,13 +77,15 @@ cp bot.toml.example bot.toml
 | 配置 | 说明 |
 |---|---|
 | `[frps] apiAddr/user/password` | frps webServer 地址与 Basic Auth 账号 |
-| `[feishu] appID/appSecret` | 飞书自建应用凭证 |
+| `[feishu] appID/appSecret/tenantKey` | 飞书自建应用凭证与允许的企业租户 |
 | `[bot] allowAllUsers/adminOpenIDs` | 员工使用开关与管理员名单 |
 | `[bot] defaultTTL` | `加白` 不带时长时的默认有效期 |
 | `[bot] maxTTL/maxActiveIPs` | gateway 强制的 24h 上限和每人 3 个有效 IP 上限 |
 | `[bot] enabled` | 紧急停用飞书长连接；不影响授权页处理已有链接 |
 | `[server]` | 授权页监听地址、HTTPS 公网地址及可信反向代理 |
-| `[storage] sqliteFile` | 用户授权、一次性令牌及消息幂等数据库 |
+| `[storage] sqliteFile` | 用户授权、一次性令牌、消息幂等及回复 outbox 数据库 |
+
+网关提供 `/healthz`（进程存活）和 `/readyz`（SQLite、frps API 就绪）。飞书事件通过 SQLite inbox 去重并恢复，回复先进入 outbox 再发送；白名单每 30 秒自动对账一次。
 
 `bot.toml` 含密钥，已在 `.gitignore` 中忽略。
 生产环境推荐通过 `passwordEnv` / `passwordFile` 和 `appSecretEnv` / `appSecretFile` 外置密钥，避免把明文放进 TOML。完整上线和回滚步骤见 [`docs/deployment-runbook.md`](./docs/deployment-runbook.md)。

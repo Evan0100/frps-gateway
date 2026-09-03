@@ -14,6 +14,8 @@ passwordEnv = "FRPS_GATEWAY_FRPS_PASSWORD"
 [feishu]
 # 飞书企业自建应用的凭证（开放平台 > 凭证与基础信息）
 appID = "cli_xxxxxxxx"
+# 建议填写本企业 tenant key；填写后会拒绝其他租户的事件。
+tenantKey = "tenant_xxxxxxxx"
 appSecretEnv = "FRPS_GATEWAY_FEISHU_APP_SECRET"
 # appSecretFile = "./secrets/feishu-app-secret"
 # appSecret = "仅限本地开发"

@@ -1,6 +1,7 @@
 package ingest
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
@@ -8,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -69,6 +71,42 @@ func TestPollerStoresRecordsWithoutDuplicates(t *testing.T) {
 	poller.pruneOnce(ctx)
 	if n, err := st.CountAccessRecords(ctx); err != nil || n != 1 {
 		t.Fatalf("count after prune = %d, %v, want 1", n, err)
+	}
+}
+
+func TestPollerRejectsMissingIdentityAndLogsFailure(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		write := map[string]any{"code": 200, "msg": "success", "data": []map[string]any{{"time": 1000, "ip": "192.0.2.1", "source": "tcp/p1", "action": "allow", "reason": "whitelisted"}}}
+		_ = json.NewEncoder(w).Encode(write)
+	}))
+	defer srv.Close()
+	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	var logs bytes.Buffer
+	p := New(frps.New(srv.URL, "admin", "secret"), st, time.Second, 30, slog.New(slog.NewTextHandler(&logs, nil)))
+	p.pollAndLog(context.Background())
+	if !strings.Contains(logs.String(), "access log ingest failed") || !strings.Contains(logs.String(), "missing instance or sequence") {
+		t.Fatalf("missing failure log: %s", logs.String())
+	}
+}
+
+func TestPollerWarnsOnSequenceGap(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	var logs bytes.Buffer
+	p := &Poller{st: st, logger: slog.New(slog.NewTextHandler(&logs, nil))}
+	records := []frps.AccessRecord{{Instance: "boot1", Seq: 5, Time: 1000, IP: "192.0.2.1", Source: "tcp/p1", Action: "allow", Reason: "whitelisted"}}
+	if _, err = p.store(context.Background(), records); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(logs.String(), "access log gap detected") {
+		t.Fatalf("missing gap warning: %s", logs.String())
 	}
 }
 

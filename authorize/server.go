@@ -26,6 +26,7 @@ type Server struct {
 	logger                     *slog.Logger
 	http                       *http.Server
 	maxActiveIPs               int
+	readiness                  func(context.Context) error
 }
 
 func New(addr, publicURL, cert, key string, trusted []string, maxActiveIPs int, st *store.Store, client *frps.Client, logger *slog.Logger) (*Server, error) {
@@ -42,10 +43,29 @@ func New(addr, publicURL, cert, key string, trusted []string, maxActiveIPs int, 
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		_, _ = w.Write([]byte("ok"))
 	})
+	mux.HandleFunc("GET /readyz", s.ready)
 	mux.HandleFunc("GET /authorize/{token}", s.get)
 	mux.HandleFunc("POST /authorize/{token}", s.post)
 	s.http = &http.Server{Addr: addr, Handler: securityHeaders(mux), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 10 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 16 << 10}
 	return s, nil
+}
+
+func (s *Server) SetReadiness(check func(context.Context) error) { s.readiness = check }
+
+func (s *Server) ready(w http.ResponseWriter, r *http.Request) {
+	if s.readiness == nil {
+		http.Error(w, "readiness check unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
+	defer cancel()
+	if err := s.readiness(ctx); err != nil {
+		s.logger.Warn("readiness check failed", "err", err)
+		http.Error(w, "not ready", http.StatusServiceUnavailable)
+		return
+	}
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	_, _ = w.Write([]byte("ready"))
 }
 
 func (s *Server) NewLink(ctx context.Context, openID, name, messageID string, ttl, validFor time.Duration) (string, error) {

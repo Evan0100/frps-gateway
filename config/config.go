@@ -47,6 +47,7 @@ type Frps struct {
 
 type Feishu struct {
 	AppID                 string `toml:"appID"`
+	TenantKey             string `toml:"tenantKey"`
 	AppSecret             string `toml:"appSecret"`
 	AppSecretEnv          string `toml:"appSecretEnv"`
 	AppSecretFile         string `toml:"appSecretFile"`

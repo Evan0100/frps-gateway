@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"frps-gateway/authorize"
 	"frps-gateway/config"
@@ -45,7 +46,9 @@ func main() {
 		os.Exit(1)
 	}
 	exec := executor.NewManaged(client, st, auth, cfg.Bot.TTL(), cfg.Bot.MaxTTLDuration(), cfg.Bot.LinkTTLDuration(), cfg.Bot.MaxActiveIPs, logger)
-	bot := feishu.NewSecure(cfg.Feishu.AppID, cfg.Feishu.AppSecret, cfg.Feishu.EncryptKey, cfg.Feishu.VerificationToken, cfg.Bot.AdminChatID, cfg.Bot.AdminOpenIDs, cfg.Bot.AllowAllUsers, cfg.Bot.RequireMentionInGroup, cfg.Bot.Workers, cfg.Bot.QueueSize, cfg.Bot.RequestsPerMinute, exec, logger)
+	auth.SetReadiness(exec.Ready)
+	bot := feishu.NewSecure(cfg.Feishu.AppID, cfg.Feishu.AppSecret, cfg.Feishu.TenantKey, cfg.Feishu.EncryptKey, cfg.Feishu.VerificationToken, cfg.Bot.AdminChatID, cfg.Bot.AdminOpenIDs, cfg.Bot.AllowAllUsers, cfg.Bot.RequireMentionInGroup, cfg.Bot.Workers, cfg.Bot.QueueSize, cfg.Bot.RequestsPerMinute, exec, logger)
+	bot.SetReplyOutbox(st)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -62,6 +65,22 @@ func main() {
 	if err := exec.Reconcile(ctx); err != nil {
 		logger.Warn("initial whitelist reconciliation failed", "err", err)
 	}
+	go func() {
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				rctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+				if err := exec.Reconcile(rctx); err != nil {
+					logger.Warn("periodic whitelist reconciliation failed", "err", err)
+				}
+				cancel()
+			}
+		}
+	}()
 	go func() {
 		if err := auth.Run(ctx); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			logger.Error("authorization server exited", "err", err)

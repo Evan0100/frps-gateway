@@ -15,7 +15,8 @@
 - frps 白名单 `POST/DELETE` 请求体限制为 16 KiB，只接受一个 JSON 值并拒绝未知字段。
 - frps HTTP vhost 不再转发客户端自带的 `X-Forwarded-For`，由 frps 生成可信来源地址。
 - `gorilla/websocket` 升级到 `v1.5.3`，`golang.org/x/crypto` 升级到 `v0.56.0`，并声明 `go1.26.6` 工具链。
-- 访问记录落库:frps 访问记录新增 `(instance, seq)` 进程内唯一标识;gateway `ingest` 拉取器默认每 5 秒增量拉取 `/api/v2/whitelist/accesslog`,按 `(instance, seq)` 事务批量写入 SQLite `access_records` 表,重复拉取与 frps 重启均不产生重复记录;默认保留 30 天,每小时清理一次,`ingest.enabled=false` 可关闭。
+- 访问记录落库：frps 访问记录新增 `(instance, seq)` 进程内唯一标识；gateway `ingest` 默认每 5 秒拉取最近记录并去重写入 SQLite。缺少标识的数据会被拒绝，轮询错误会记录，序号断档会告警；默认保留 30 天，每小时清理，`ingest.enabled=false` 可关闭。
+- 启动对账已改为双向：补回有效 grant，并删除没有任何有效 grant 的 gateway 受管 IP；未知的管理员手工条目不处理。
 
 ## 验证结果
 

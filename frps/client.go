@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -14,6 +15,8 @@ import (
 
 	"frps-gateway/duration"
 )
+
+var ErrResponseTooLarge = errors.New("frps API response too large")
 
 // Entry is one whitelist entry on frps.
 type Entry struct {
@@ -134,9 +137,12 @@ func (c *Client) doLimit(ctx context.Context, method, path string, body any, out
 		return err
 	}
 	defer resp.Body.Close()
-	data, err := io.ReadAll(io.LimitReader(resp.Body, maxBytes))
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxBytes+1))
 	if err != nil {
 		return err
+	}
+	if int64(len(data)) > maxBytes {
+		return ErrResponseTooLarge
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return &APIError{Status: resp.StatusCode, Body: strings.TrimSpace(string(data))}

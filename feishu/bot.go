@@ -4,7 +4,9 @@ package feishu
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -17,6 +19,7 @@ import (
 	larkws "github.com/larksuite/oapi-sdk-go/v3/ws"
 
 	"frps-gateway/interaction"
+	"frps-gateway/store"
 )
 
 // Executor executes a chat command with identity and delivery metadata.
@@ -24,9 +27,21 @@ type Executor interface {
 	Execute(ctx context.Context, req interaction.Request) string
 }
 
+type ReplyOutbox interface {
+	EnqueueReply(context.Context, string, string, string) error
+	PendingReplies(context.Context, int) ([]store.OutboxMessage, error)
+	MarkReplySent(context.Context, string) error
+	RetryReply(context.Context, string, int) error
+	EnqueueInbox(context.Context, string, []byte) error
+	ClaimInbox(context.Context) (store.InboxEvent, bool, error)
+	CompleteInbox(context.Context, string) error
+	RetryInbox(context.Context, string, int) error
+}
+
 type Bot struct {
 	appID             string
 	appSecret         string
+	tenantKey         string
 	adminChatID       string
 	adminOpenIDs      map[string]bool
 	api               *lark.Client
@@ -38,17 +53,23 @@ type Bot struct {
 	requestsPerMinute int
 	rateMu            sync.Mutex
 	rate              map[string][]time.Time
+	rateCleanup       time.Time
 	encryptKey        string
 	verificationToken string
+	outbox            ReplyOutbox
+	inboxWorkers      int
 }
 
 // New creates a Bot. Exactly one of adminChatID / adminOpenIDs must be set
 // (enforced by config validation): chat mode accepts every message from that
 // chat, open-id mode accepts messages from those users only.
 func New(appID, appSecret, adminChatID string, adminOpenIDs []string, exec Executor, logger *slog.Logger) *Bot {
-	return NewSecure(appID, appSecret, "", "", adminChatID, adminOpenIDs, false, true, 4, 100, 10, exec, logger)
+	return NewSecure(appID, appSecret, "", "", "", adminChatID, adminOpenIDs, false, true, 4, 100, 10, exec, logger)
 }
-func NewSecure(appID, appSecret, encryptKey, verificationToken, adminChatID string, adminOpenIDs []string, allowAll, requireMention bool, workers, queueSize, rpm int, exec Executor, logger *slog.Logger) *Bot {
+
+// SetReplyOutbox enables durable reply delivery and retry.
+func (b *Bot) SetReplyOutbox(outbox ReplyOutbox) { b.outbox = outbox }
+func NewSecure(appID, appSecret, tenantKey, encryptKey, verificationToken, adminChatID string, adminOpenIDs []string, allowAll, requireMention bool, workers, queueSize, rpm int, exec Executor, logger *slog.Logger) *Bot {
 	opens := make(map[string]bool, len(adminOpenIDs))
 	for _, id := range adminOpenIDs {
 		opens[id] = true
@@ -56,6 +77,7 @@ func NewSecure(appID, appSecret, encryptKey, verificationToken, adminChatID stri
 	b := &Bot{
 		appID:        appID,
 		appSecret:    appSecret,
+		tenantKey:    tenantKey,
 		adminChatID:  adminChatID,
 		adminOpenIDs: opens,
 		api:          lark.NewClient(appID, appSecret),
@@ -63,11 +85,12 @@ func NewSecure(appID, appSecret, encryptKey, verificationToken, adminChatID stri
 		logger:       logger,
 		encryptKey:   encryptKey, verificationToken: verificationToken,
 		allowAllUsers: allowAll, requireMention: requireMention, queue: make(chan *larkim.P2MessageReceiveV1, queueSize), requestsPerMinute: rpm, rate: map[string][]time.Time{},
+		inboxWorkers: workers,
 	}
 	for i := 0; i < workers; i++ {
 		go func() {
 			for e := range b.queue {
-				b.handle(e)
+				_ = b.handle(e)
 			}
 		}()
 	}
@@ -77,6 +100,12 @@ func NewSecure(appID, appSecret, encryptKey, verificationToken, adminChatID stri
 // Run starts the WebSocket long connection; it blocks until ctx is cancelled
 // or the connection fails terminally. No public webhook endpoint is needed.
 func (b *Bot) Run(ctx context.Context) error {
+	if b.outbox != nil {
+		go b.runReplyOutbox(ctx)
+		for i := 0; i < b.inboxWorkers; i++ {
+			go b.runInbox(ctx)
+		}
+	}
 	d := dispatcher.NewEventDispatcher(b.verificationToken, b.encryptKey).
 		OnP2MessageReceiveV1(b.onMessage)
 	cli := larkws.NewClient(b.appID, b.appSecret,
@@ -88,49 +117,69 @@ func (b *Bot) Run(ctx context.Context) error {
 
 // onMessage acks the event immediately and processes it asynchronously:
 // Feishu redelivers events that are not handled within 3 seconds.
-func (b *Bot) onMessage(_ context.Context, e *larkim.P2MessageReceiveV1) error {
+func (b *Bot) onMessage(ctx context.Context, e *larkim.P2MessageReceiveV1) error {
+	if b.outbox != nil {
+		if e == nil || e.Event == nil || e.Event.Message == nil || deref(e.Event.Message.MessageId) == "" {
+			return errors.New("invalid Feishu event")
+		}
+		payload, err := json.Marshal(e)
+		if err != nil {
+			return err
+		}
+		persistCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+		defer cancel()
+		return b.outbox.EnqueueInbox(persistCtx, deref(e.Event.Message.MessageId), payload)
+	}
 	select {
 	case b.queue <- e:
 	default:
-		b.logger.Warn("bot queue full; drop event")
+		b.logger.Warn("bot queue full; request Feishu redelivery")
+		return errors.New("bot queue full")
 	}
 	return nil
 }
 
-func (b *Bot) handle(e *larkim.P2MessageReceiveV1) {
+func (b *Bot) handle(e *larkim.P2MessageReceiveV1) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
 	if e.Event == nil || e.Event.Message == nil || e.Event.Sender == nil || e.Event.Sender.SenderId == nil {
-		return
+		return nil
+	}
+	if e.EventV2Base == nil || e.EventV2Base.Header == nil || e.EventV2Base.Header.AppID != b.appID {
+		b.logger.Warn("ignore event for unexpected app")
+		return nil
+	}
+	if b.tenantKey != "" && e.EventV2Base.Header.TenantKey != b.tenantKey {
+		b.logger.Warn("ignore event from unexpected tenant", "tenant_key", e.EventV2Base.Header.TenantKey)
+		return nil
 	}
 	msg := e.Event.Message
 	sender := e.Event.Sender
 
 	if deref(sender.SenderType) != "user" {
-		return
+		return nil
 	}
 	if deref(msg.MessageType) != "text" {
 		b.logger.Debug("ignore non-text message", "message_id", deref(msg.MessageId), "type", deref(msg.MessageType))
-		return
+		return nil
 	}
 	openID := deref(sender.SenderId.OpenId)
 	chatID := deref(msg.ChatId)
 	if !b.allowAllUsers && !b.isAdmin(openID, chatID) {
 		b.logger.Warn("ignore message from unauthorized user", "open_id", openID, "chat_id", chatID)
-		return
+		return nil
 	}
-	if deref(msg.ChatType) == "group" && b.requireMention && len(msg.Mentions) == 0 {
-		return
+	if deref(msg.ChatType) == "group" && b.requireMention && !mentionsBot(msg.Mentions) {
+		return nil
 	}
 	if !b.allow(openID) {
-		_ = b.sendText(ctx, chatID, "请求过于频繁，请稍后再试")
-		return
+		return b.deliverReply(ctx, deref(msg.MessageId)+":rate-limit", chatID, "请求过于频繁，请稍后再试")
 	}
 	text, err := extractText(deref(msg.Content))
 	if err != nil {
 		b.logger.Warn("decode message content", "message_id", deref(msg.MessageId), "err", err)
-		return
+		return nil
 	}
 	b.logger.Info("handle command", "open_id", openID, "chat_id", chatID, "message_id", deref(msg.MessageId))
 
@@ -140,8 +189,94 @@ func (b *Bot) handle(e *larkim.P2MessageReceiveV1) {
 		ChatID:         chatID,
 		MessageID:      deref(msg.MessageId),
 	})
-	if err := b.sendText(ctx, chatID, reply); err != nil {
-		b.logger.Error("send reply failed", "chat_id", chatID, "err", err)
+	return b.deliverReply(ctx, deref(msg.MessageId), chatID, reply)
+}
+
+func mentionsBot(mentions []*larkim.MentionEvent) bool {
+	for _, mention := range mentions {
+		if mention != nil && deref(mention.MentionedType) == "bot" {
+			return true
+		}
+	}
+	return false
+}
+
+func (b *Bot) deliverReply(ctx context.Context, id, chatID, reply string) error {
+	if b.outbox == nil {
+		if err := b.sendText(ctx, id, chatID, reply); err != nil {
+			b.logger.Error("send reply failed", "chat_id", chatID, "err", err)
+		}
+		return nil
+	}
+	if err := b.outbox.EnqueueReply(ctx, id, chatID, reply); err != nil {
+		b.logger.Error("enqueue reply failed", "message_id", id, "err", err)
+		return err
+	}
+	return nil
+}
+
+func (b *Bot) runInbox(ctx context.Context) {
+	ticker := time.NewTicker(500 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		item, ok, err := b.outbox.ClaimInbox(ctx)
+		if err != nil {
+			b.logger.Error("claim bot inbox", "err", err)
+		} else if ok {
+			var event larkim.P2MessageReceiveV1
+			err = json.Unmarshal(item.Payload, &event)
+			if err == nil {
+				err = b.handle(&event)
+			}
+			if err == nil {
+				err = b.outbox.CompleteInbox(ctx, item.ID)
+			}
+			if err != nil {
+				b.logger.Warn("process bot inbox failed", "id", item.ID, "attempt", item.Attempts+1, "err", err)
+				_ = b.outbox.RetryInbox(ctx, item.ID, item.Attempts)
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
+func (b *Bot) runReplyOutbox(ctx context.Context) {
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+	for {
+		b.flushReplies(ctx)
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
+func (b *Bot) flushReplies(ctx context.Context) {
+	items, err := b.outbox.PendingReplies(ctx, 20)
+	if err != nil {
+		b.logger.Error("load reply outbox", "err", err)
+		return
+	}
+	for _, item := range items {
+		sendCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		err = b.sendText(sendCtx, item.ID, item.ChatID, item.Text)
+		cancel()
+		if err == nil {
+			if markErr := b.outbox.MarkReplySent(ctx, item.ID); markErr != nil {
+				b.logger.Error("mark reply sent", "id", item.ID, "err", markErr)
+			}
+			continue
+		}
+		b.logger.Warn("send queued reply failed", "id", item.ID, "attempt", item.Attempts+1, "err", err)
+		if retryErr := b.outbox.RetryReply(ctx, item.ID, item.Attempts); retryErr != nil {
+			b.logger.Error("schedule reply retry", "id", item.ID, "err", retryErr)
+		}
 	}
 }
 
@@ -150,6 +285,14 @@ func (b *Bot) allow(id string) bool {
 	defer b.rateMu.Unlock()
 	now := time.Now()
 	cut := now.Add(-time.Minute)
+	if now.Sub(b.rateCleanup) >= time.Minute {
+		for key, entries := range b.rate {
+			if len(entries) == 0 || !entries[len(entries)-1].After(cut) {
+				delete(b.rate, key)
+			}
+		}
+		b.rateCleanup = now
+	}
 	old := b.rate[id]
 	n := old[:0]
 	for _, t := range old {
@@ -158,7 +301,11 @@ func (b *Bot) allow(id string) bool {
 		}
 	}
 	if len(n) >= b.requestsPerMinute {
-		b.rate[id] = n
+		if len(n) == 0 {
+			delete(b.rate, id)
+		} else {
+			b.rate[id] = n
+		}
 		return false
 	}
 	b.rate[id] = append(n, now)
@@ -182,7 +329,7 @@ func extractText(content string) (string, error) {
 	return c.Text, nil
 }
 
-func (b *Bot) sendText(ctx context.Context, chatID, text string) error {
+func (b *Bot) sendText(ctx context.Context, id, chatID, text string) error {
 	content, err := json.Marshal(map[string]string{"text": text})
 	if err != nil {
 		return err
@@ -191,6 +338,7 @@ func (b *Bot) sendText(ctx context.Context, chatID, text string) error {
 		ReceiveId(chatID).
 		MsgType("text").
 		Content(string(content)).
+		Uuid(deliveryUUID(id)).
 		Build()
 	req := larkim.NewCreateMessageReqBuilder().
 		ReceiveIdType("chat_id").
@@ -204,6 +352,11 @@ func (b *Bot) sendText(ctx context.Context, chatID, text string) error {
 		return fmt.Errorf("im.message.create code=%d msg=%s", resp.Code, resp.Msg)
 	}
 	return nil
+}
+
+func deliveryUUID(id string) string {
+	sum := sha256.Sum256([]byte("frps-gateway/reply/" + id))
+	return fmt.Sprintf("%x-%x-%x-%x-%x", sum[0:4], sum[4:6], sum[6:8], sum[8:10], sum[10:16])
 }
 
 func deref(s *string) string {

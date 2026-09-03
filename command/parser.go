@@ -80,6 +80,14 @@ func Parse(raw string) (*Command, error) {
 // alias and its argument, so "加白1.2.3.4" behaves like "加白 1.2.3.4".
 func normalize(raw string) string {
 	text := strings.TrimSpace(mentionPattern.ReplaceAllString(raw, ""))
+	// The authorization commands begin with the ordinary "加白"/"add"
+	// aliases. Preserve an exact authorization command before adding a space
+	// for glued IP input, otherwise "加白当前IP" becomes "加白 当前IP".
+	for _, alias := range authorizeAliases {
+		if strings.EqualFold(text, alias) {
+			return text
+		}
+	}
 	lower := strings.ToLower(text)
 	for _, alias := range aliasPrefixes {
 		if len(text) > len(alias) && strings.HasPrefix(lower, alias) && text[len(alias)] != ' ' {

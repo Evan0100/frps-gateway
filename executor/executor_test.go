@@ -6,12 +6,14 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"frps-gateway/frps"
 	"frps-gateway/interaction"
+	"frps-gateway/store"
 )
 
 // mock frps whitelist API
@@ -40,6 +42,28 @@ func newMockServer(t *testing.T) *httptest.Server {
 		_, _ = w.Write([]byte(`{"code":200,"msg":"success","data":null}`))
 	})
 	return httptest.NewServer(mux)
+}
+
+func TestReconcileRemovesStaleManagedIP(t *testing.T) {
+	srv := newMockServer(t)
+	defer srv.Close()
+	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	now := time.Now()
+	if err = st.AddGrant(context.Background(), store.Grant{OpenID: "u1", IP: "1.2.3.4", Source: "test", CreatedAt: now.Add(-2 * time.Hour), ExpireAt: now.Add(-time.Hour)}); err != nil {
+		t.Fatal(err)
+	}
+	exec := NewManaged(frps.New(srv.URL, "admin", "secret"), st, nil, time.Hour, 24*time.Hour, time.Minute, 3, slog.Default())
+	if err = exec.Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	ips, err := st.ListManagedIPs(context.Background())
+	if err != nil || len(ips) != 0 {
+		t.Fatalf("managed IPs=%v err=%v", ips, err)
+	}
 }
 
 func TestExecute(t *testing.T) {

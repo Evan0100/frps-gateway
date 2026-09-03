@@ -3,8 +3,10 @@ package frps
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
@@ -54,6 +56,17 @@ func TestClientV2Envelope(t *testing.T) {
 
 	if err := client.Remove(context.Background(), "5.6.7.8"); err != nil {
 		t.Fatalf("Remove() error = %v", err)
+	}
+}
+
+func TestClientRejectsOversizedResponse(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"code":200,"msg":"success","data":null}` + strings.Repeat(" ", 1<<20)))
+	}))
+	defer server.Close()
+	err := New(server.URL, "admin", "secret").do(context.Background(), http.MethodGet, "/", nil, nil)
+	if !errors.Is(err, ErrResponseTooLarge) {
+		t.Fatalf("err=%v", err)
 	}
 }
 

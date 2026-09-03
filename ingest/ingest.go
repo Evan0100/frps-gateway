@@ -6,6 +6,7 @@ package ingest
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
@@ -13,6 +14,8 @@ import (
 	"frps-gateway/frps"
 	"frps-gateway/store"
 )
+
+var ErrInvalidRecordIdentity = errors.New("access record is missing instance or sequence")
 
 const (
 	// fetchLimit matches frps's maximum page size for the accesslog API.
@@ -53,16 +56,22 @@ func (p *Poller) Run(ctx context.Context) {
 	pruner := time.NewTicker(pruneInterval)
 	defer pruner.Stop()
 
-	p.PollOnce(ctx)
+	p.pollAndLog(ctx)
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			p.PollOnce(ctx)
+			p.pollAndLog(ctx)
 		case <-pruner.C:
 			p.pruneOnce(ctx)
 		}
+	}
+}
+
+func (p *Poller) pollAndLog(ctx context.Context) {
+	if err := p.PollOnce(ctx); err != nil {
+		p.logger.Error("access log ingest failed", "err", err)
 	}
 }
 
@@ -87,7 +96,24 @@ func (p *Poller) store(ctx context.Context, records []frps.AccessRecord) (int64,
 		return 0, nil
 	}
 	batch := make([]store.AccessRecord, 0, len(records))
+	type sequenceRange struct {
+		min, max uint64
+		count    int
+	}
+	ranges := make(map[string]sequenceRange)
 	for _, rec := range records {
+		if rec.Instance == "" || rec.Seq == 0 {
+			return 0, fmt.Errorf("%w: instance=%q seq=%d", ErrInvalidRecordIdentity, rec.Instance, rec.Seq)
+		}
+		rg, ok := ranges[rec.Instance]
+		if !ok || rec.Seq < rg.min {
+			rg.min = rec.Seq
+		}
+		if rec.Seq > rg.max {
+			rg.max = rec.Seq
+		}
+		rg.count++
+		ranges[rec.Instance] = rg
 		batch = append(batch, store.AccessRecord{
 			Instance: rec.Instance,
 			Seq:      rec.Seq,
@@ -98,6 +124,19 @@ func (p *Poller) store(ctx context.Context, records []frps.AccessRecord) (int64,
 			Action:   rec.Action,
 			Reason:   rec.Reason,
 		})
+	}
+	for instance, rg := range ranges {
+		previous, exists, err := p.st.MaxAccessSequence(ctx, instance)
+		if err != nil {
+			return 0, fmt.Errorf("read access log cursor: %w", err)
+		}
+		expected := uint64(1)
+		if exists {
+			expected = previous + 1
+		}
+		if (rg.max >= expected && rg.min > expected) || rg.max-rg.min+1 > uint64(rg.count) {
+			p.logger.Warn("access log gap detected", "instance", instance, "expectedSeq", expected, "oldestFetchedSeq", rg.min, "newestFetchedSeq", rg.max)
+		}
 	}
 	inserted, err := p.st.InsertAccessRecords(ctx, batch)
 	if err != nil {

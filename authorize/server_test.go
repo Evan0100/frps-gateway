@@ -3,7 +3,9 @@ package authorize
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"log/slog"
+	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"testing"
@@ -29,6 +31,26 @@ func TestClientIPTrustBoundary(t *testing.T) {
 	ip, err = s.clientIP(r)
 	if err != nil || ip != "203.0.113.8" {
 		t.Fatalf("trusted proxy ip=%s err=%v", ip, err)
+	}
+}
+
+func TestReadinessEndpoint(t *testing.T) {
+	s, err := New(":0", "https://access.example.com", "", "", nil, 3, nil, nil, slog.Default())
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.SetReadiness(func(context.Context) error { return errors.New("frps unavailable") })
+	r := httptest.NewRequest("GET", "http://gateway/readyz", nil)
+	w := httptest.NewRecorder()
+	s.http.Handler.ServeHTTP(w, r)
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status=%d", w.Code)
+	}
+	s.SetReadiness(func(context.Context) error { return nil })
+	w = httptest.NewRecorder()
+	s.http.Handler.ServeHTTP(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d", w.Code)
 	}
 }
 

@@ -81,6 +81,59 @@ func TestMessageIdempotency(t *testing.T) {
 	}
 }
 
+func TestReplyOutboxPersistsRetriesAndCompletion(t *testing.T) {
+	s, err := Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	ctx := context.Background()
+	if err = s.EnqueueReply(ctx, "m1", "c1", "ok"); err != nil {
+		t.Fatal(err)
+	}
+	items, err := s.PendingReplies(ctx, 10)
+	if err != nil || len(items) != 1 || items[0].Text != "ok" {
+		t.Fatalf("items=%+v err=%v", items, err)
+	}
+	if err = s.RetryReply(ctx, "m1", 0); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := s.PendingReplyCount(ctx); err != nil || n != 1 {
+		t.Fatalf("pending=%d err=%v", n, err)
+	}
+	if err = s.MarkReplySent(ctx, "m1"); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := s.PendingReplyCount(ctx); err != nil || n != 0 {
+		t.Fatalf("pending=%d err=%v", n, err)
+	}
+}
+
+func TestInboxDeduplicatesAndCompletes(t *testing.T) {
+	s, err := Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	ctx := context.Background()
+	if err = s.EnqueueInbox(ctx, "event-1", []byte(`{"event":"one"}`)); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.EnqueueInbox(ctx, "event-1", []byte(`{"event":"duplicate"}`)); err != nil {
+		t.Fatal(err)
+	}
+	item, ok, err := s.ClaimInbox(ctx)
+	if err != nil || !ok || item.ID != "event-1" || string(item.Payload) != `{"event":"one"}` {
+		t.Fatalf("item=%+v ok=%v err=%v", item, ok, err)
+	}
+	if err = s.CompleteInbox(ctx, item.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, err = s.ClaimInbox(ctx); err != nil || ok {
+		t.Fatalf("second claim ok=%v err=%v", ok, err)
+	}
+}
+
 func TestAccessRecordsInsertDedupAndPrune(t *testing.T) {
 	s, err := Open(filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {
