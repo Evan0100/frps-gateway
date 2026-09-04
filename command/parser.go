@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"unicode"
 
 	"frps-gateway/duration"
 )
@@ -14,34 +15,33 @@ import (
 type Action string
 
 const (
-	ActionAdd       Action = "add"
-	ActionRemove    Action = "remove"
-	ActionList      Action = "list"
-	ActionHelp      Action = "help"
-	ActionAuthorize Action = "authorize"
+	ActionAdd    Action = "add"
+	ActionRemove Action = "remove"
+	ActionList   Action = "list"
+	ActionHelp   Action = "help"
+	ActionMenu   Action = "menu"
 )
 
 // Long aliases first so e.g. "list..." is not split by "ls".
 var (
-	addAliases       = []string{"加白", "添加", "add"}
-	removeAliases    = []string{"删白", "删除", "remove", "del"}
-	listAliases      = []string{"我的白名单", "白名单", "列表", "list", "ls"}
-	helpAliases      = []string{"帮助", "help", "?", "？"}
-	authorizeAliases = []string{"加白当前ip", "授权当前ip", "authorize"}
+	addAliases    = []string{"申请授权"}
+	removeAliases = []string{"撤销授权"}
+	listAliases   = []string{"我的授权"}
+	menuAliases   = []string{"/start", "开始", "菜单"}
 
 	// feishu renders @mentions inside text as @_user_1 placeholders
 	mentionPattern = regexp.MustCompile(`@_user_\d+`)
 
-	aliasPrefixes = concat(addAliases, removeAliases, listAliases)
+	aliasPrefixes = concat(addAliases, removeAliases)
 )
 
 // Usage is the help text replied for unknown or malformed instructions.
 const Usage = `可用指令：
-  加白当前IP           生成一次性链接，自动识别你的公网 IP（推荐）
-  加白 <IP> [有效期]   添加 IP 到你自己的授权记录
-  删白 <IP>            撤销你对该 IP 的授权；其他人的授权不受影响
-  白名单               查看你自己的有效授权
-示例：加白 1.2.3.4 2h`
+  /start                    打开操作菜单
+  申请授权 <IP> [有效期]   为指定公网 IP 添加临时授权
+  我的授权                  查看自己的有效授权
+  撤销授权 <IP>             撤销指定授权；其他人的授权不受影响
+示例：申请授权 1.2.3.4 2h`
 
 // Command is a parsed whitelist instruction.
 type Command struct {
@@ -61,33 +61,23 @@ func Parse(raw string) (*Command, error) {
 	}
 	head := strings.ToLower(fields[0])
 	switch {
-	case contains(authorizeAliases, head):
-		return &Command{Action: ActionAuthorize}, nil
+	case contains(menuAliases, head):
+		return &Command{Action: ActionMenu}, nil
 	case contains(addAliases, head):
 		return parseAdd(fields[1:])
 	case contains(removeAliases, head):
 		return parseRemove(fields[1:])
 	case contains(listAliases, head):
 		return &Command{Action: ActionList}, nil
-	case contains(helpAliases, head):
-		return &Command{Action: ActionHelp}, nil
 	default:
-		return &Command{Action: ActionHelp}, fmt.Errorf("无法识别的指令 %q", fields[0])
+		return &Command{Action: ActionHelp}, fmt.Errorf("无法识别该操作，请发送 /start 打开菜单")
 	}
 }
 
 // normalize strips mention placeholders and inserts a space between a glued
-// alias and its argument, so "加白1.2.3.4" behaves like "加白 1.2.3.4".
+// action name and its argument.
 func normalize(raw string) string {
 	text := strings.TrimSpace(mentionPattern.ReplaceAllString(raw, ""))
-	// The authorization commands begin with the ordinary "加白"/"add"
-	// aliases. Preserve an exact authorization command before adding a space
-	// for glued IP input, otherwise "加白当前IP" becomes "加白 当前IP".
-	for _, alias := range authorizeAliases {
-		if strings.EqualFold(text, alias) {
-			return text
-		}
-	}
 	lower := strings.ToLower(text)
 	for _, alias := range aliasPrefixes {
 		if len(text) > len(alias) && strings.HasPrefix(lower, alias) && text[len(alias)] != ' ' {
@@ -100,12 +90,13 @@ func normalize(raw string) string {
 
 func parseAdd(args []string) (*Command, error) {
 	if len(args) == 0 {
-		return &Command{Action: ActionHelp}, fmt.Errorf("缺少 IP，示例：加白 1.2.3.4 2h")
+		return &Command{Action: ActionHelp}, fmt.Errorf("请填写公网 IP，例如：申请授权 1.2.3.4 2h")
 	}
 	if len(args) > 2 {
-		return &Command{Action: ActionHelp}, fmt.Errorf("参数过多，示例：加白 1.2.3.4 2h")
+		return &Command{Action: ActionHelp}, fmt.Errorf("参数过多，例如：申请授权 1.2.3.4 2h")
 	}
-	ip := net.ParseIP(args[0])
+	ipText := sanitizeIPToken(args[0])
+	ip := net.ParseIP(ipText)
 	if ip == nil {
 		return &Command{Action: ActionHelp}, fmt.Errorf("%q 不是合法的 IP 地址", args[0])
 	}
@@ -122,16 +113,29 @@ func parseAdd(args []string) (*Command, error) {
 
 func parseRemove(args []string) (*Command, error) {
 	if len(args) == 0 {
-		return &Command{Action: ActionHelp}, fmt.Errorf("缺少 IP，示例：删白 1.2.3.4")
+		return &Command{Action: ActionHelp}, fmt.Errorf("请选择或填写需要撤销的 IP，例如：撤销授权 1.2.3.4")
 	}
 	if len(args) > 1 {
-		return &Command{Action: ActionHelp}, fmt.Errorf("参数过多，示例：删白 1.2.3.4")
+		return &Command{Action: ActionHelp}, fmt.Errorf("参数过多，例如：撤销授权 1.2.3.4")
 	}
-	ip := net.ParseIP(args[0])
+	ipText := sanitizeIPToken(args[0])
+	ip := net.ParseIP(ipText)
 	if ip == nil {
 		return &Command{Action: ActionHelp}, fmt.Errorf("%q 不是合法的 IP 地址", args[0])
 	}
 	return &Command{Action: ActionRemove, IP: ip.String()}, nil
+}
+
+// sanitizeIPToken removes Unicode format characters that can be introduced by
+// chat clients or input methods (for example zero-width spaces and BOMs).
+// No visible character is rewritten, so malformed addresses still fail closed.
+func sanitizeIPToken(s string) string {
+	return strings.Map(func(r rune) rune {
+		if unicode.Is(unicode.Cf, r) {
+			return -1
+		}
+		return r
+	}, s)
 }
 
 func contains(aliases []string, s string) bool {

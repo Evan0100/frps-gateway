@@ -13,6 +13,8 @@
 
 飞书事件先写入 SQLite inbox，落盘成功后才确认；重复事件按 message ID 去重，处理中断后会自动重试。回复采用 SQLite outbox：命令结果先持久化，再由后台发送；发送失败按指数退避重试，并使用由 message ID 派生的稳定 UUID 防止重试产生重复消息。`/healthz` 只表示进程存活；发布验收和监控应使用 `/readyz`，其检查超时为 3 秒。两个端点都不会暴露内部错误或凭据。
 
+飞书交互契约：`/start`、`开始`、`菜单` 返回动态 `interactive` 卡片；手动输入仅接受 `申请授权 <IP> [有效期]`、`我的授权` 和 `撤销授权 <IP>`。原申请访问、我的访问、撤销、加白、删白、白名单、help 及英文命令已移除。卡片动作通过长连接回调 `card.action.trigger` 接收；操作者身份只取回调中的 `operator.open_id`，聊天范围只取 `context.open_chat_id`，不接受按钮 value 传入身份。`list` 动作读取当前用户有效 grant；`revoke` 动作只接受合法 IP，并复用现有按用户撤销、共享 IP 聚合和 MessageID 幂等逻辑；未知动作只返回错误提示，不执行状态变更。
+
 员工授权只提交 TTL，不提交访问时段。同一公网 IP 有多个员工授权时，frps 条目的到期时间取所有有效 grant 的最大值；管理员直接在 frps 设置的访问时段是该 IP 的全局策略，gateway 刷新 TTL 时省略 `windows`，因此不会覆盖该策略。
 
 ## Overview

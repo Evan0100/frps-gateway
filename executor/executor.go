@@ -55,8 +55,6 @@ func (e *Executor) Execute(ctx context.Context, r interaction.Request) string {
 			out = e.remove(ctx, r, c)
 		case command.ActionList:
 			out = e.list(ctx, r)
-		case command.ActionAuthorize:
-			out = e.authorize(ctx, r)
 		default:
 			out = command.Usage
 		}
@@ -81,7 +79,7 @@ func (e *Executor) add(ctx context.Context, r interaction.Request, c *command.Co
 		if err := e.store.AddGrantLimited(ctx, store.Grant{OpenID: r.OperatorOpenID, OperatorName: r.OperatorName, IP: c.IP, Source: "feishu_command", CreatedAt: now, ExpireAt: now.Add(ttl)}, e.maxActiveIPs); errors.Is(err, store.ErrActiveIPLimit) {
 			return fmt.Sprintf("你最多只能保留 %d 个有效 IP，请先删除一个旧 IP", e.maxActiveIPs)
 		} else if err != nil {
-			return "加白记录失败：" + err.Error()
+			return "授权记录失败：" + err.Error()
 		}
 	}
 	en, err := e.client.Add(ctx, c.IP, ttl)
@@ -89,7 +87,7 @@ func (e *Executor) add(ctx context.Context, r interaction.Request, c *command.Co
 		e.logger.Warn("sync whitelist failed", "ip", c.IP, "err", err)
 		return "授权已记录，但同步 frps 失败，请联系管理员：" + err.Error()
 	}
-	return fmt.Sprintf("已加白 %s，有效期 %s（至 %s）", en.IP, duration.Format(ttl), time.Unix(en.ExpireAt, 0).Format("01-02 15:04"))
+	return fmt.Sprintf("授权成功：%s，有效期 %s（至 %s）", en.IP, duration.Format(ttl), time.Unix(en.ExpireAt, 0).Format("01-02 15:04"))
 }
 func (e *Executor) remove(ctx context.Context, r interaction.Request, c *command.Command) string {
 	if e.store == nil {
@@ -99,9 +97,9 @@ func (e *Executor) remove(ctx context.Context, r interaction.Request, c *command
 			return c.IP + " 不在白名单中"
 		}
 		if err != nil {
-			return "删白失败：" + err.Error()
+			return "撤销失败：" + err.Error()
 		}
-		return "已移除 " + c.IP
+		return "授权已撤销：" + c.IP
 	}
 	n, err := e.store.RevokeUserIP(ctx, r.OperatorOpenID, c.IP)
 	if err != nil {
@@ -129,7 +127,7 @@ func (e *Executor) remove(ctx context.Context, r interaction.Request, c *command
 	if ok {
 		return "已撤销你的授权；该 IP 仍有其他用户的有效授权"
 	}
-	return "已移除 " + c.IP
+	return "授权已撤销：" + c.IP
 }
 func (e *Executor) list(ctx context.Context, r interaction.Request) string {
 	if e.store == nil {
@@ -138,10 +136,10 @@ func (e *Executor) list(ctx context.Context, r interaction.Request) string {
 			return "查询失败：" + err.Error()
 		}
 		if len(es) == 0 {
-			return "白名单为空"
+			return "当前没有有效授权"
 		}
 		var b strings.Builder
-		fmt.Fprintf(&b, "白名单共 %d 条：", len(es))
+		fmt.Fprintf(&b, "有效授权共 %d 条：", len(es))
 		for _, en := range es {
 			fmt.Fprintf(&b, "\n%s  剩余至 %s", en.IP, time.Unix(en.ExpireAt, 0).Format("01-02 15:04"))
 		}
@@ -160,16 +158,6 @@ func (e *Executor) list(ctx context.Context, r interaction.Request) string {
 		fmt.Fprintf(&b, "\n%s  至 %s", g.IP, g.ExpireAt.Format("01-02 15:04"))
 	}
 	return b.String()
-}
-func (e *Executor) authorize(ctx context.Context, r interaction.Request) string {
-	if e.links == nil {
-		return "当前未启用自动 IP 授权"
-	}
-	link, err := e.links.NewLink(ctx, r.OperatorOpenID, r.OperatorName, r.MessageID, e.defaultTTL, e.linkTTL)
-	if err != nil {
-		return "生成授权链接失败：" + err.Error()
-	}
-	return "请在 " + duration.Format(e.linkTTL) + " 内打开此一次性链接（请勿转发）：\n" + link
 }
 func (e *Executor) Reconcile(ctx context.Context) error {
 	e.reconcileMu.Lock()

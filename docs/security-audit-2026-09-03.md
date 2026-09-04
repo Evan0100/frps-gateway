@@ -13,7 +13,7 @@
 ## 2. 审查范围与方法
 
 - `frp` 当前分支及未提交的白名单持久化、管理 API、入口拦截和管理页面改动。
-- `frps-gateway` 飞书长连接、管理员判断、指令执行和 frps API 客户端。
+- `frps-gateway` 飞书长连接、消息范围判断、指令执行和 frps API 客户端。
 - `dist/frp-whitelist-windows-amd64-20260903/conf/frps.toml` 发布配置；敏感值只检查是否配置、长度及是否为常见示例值，未写入本报告。
 - `go test ./...`、`go vet ./...` 和 Go 官方 `govulncheck`。
 - frp 官方安全公告、Go 漏洞数据库、CISA 勒索防护指南和 MITRE ATT&CK。
@@ -103,7 +103,7 @@ frp 的 HTTP vhost 白名单使用真实 TCP `RemoteAddr`，不会直接信任�
 - 执行器没有把飞书用户、消息 ID 和结果写入持久化审计；frps 侧只能看到共享 Basic Auth 账号和本机来源。
 - `frps.apiAddr` 没有限制协议和目标。若误配为远程 HTTP，Basic Auth 凭据会以可还原形式传输。
 
-机器人上线前建议只使用 `adminOpenIDs`；要求私聊或显式 @；按 `MessageID` 建唯一索引实现幂等；限制并发和每用户频率；设置最大 TTL；将操作者、原消息、目标 IP、结果和错误持久化；校验 HTTP 只允许回环地址，其他地址必须为 HTTPS。
+机器人上线前应在飞书开放平台严格限制应用可用范围；群聊要求显式 @；按 `MessageID` 建唯一索引实现幂等；限制并发和每用户频率；设置最大 TTL；将操作者、原消息、目标 IP、结果和错误持久化；校验 HTTP 只允许回环地址，其他地址必须为 HTTPS。
 
 ### SEC-09：文档存在过期且相互矛盾的安全描述（中）
 

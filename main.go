@@ -47,7 +47,7 @@ func main() {
 	}
 	exec := executor.NewManaged(client, st, auth, cfg.Bot.TTL(), cfg.Bot.MaxTTLDuration(), cfg.Bot.LinkTTLDuration(), cfg.Bot.MaxActiveIPs, logger)
 	auth.SetReadiness(exec.Ready)
-	bot := feishu.NewSecure(cfg.Feishu.AppID, cfg.Feishu.AppSecret, cfg.Feishu.TenantKey, cfg.Feishu.EncryptKey, cfg.Feishu.VerificationToken, cfg.Bot.AdminChatID, cfg.Bot.AdminOpenIDs, cfg.Bot.AllowAllUsers, cfg.Bot.RequireMentionInGroup, cfg.Bot.Workers, cfg.Bot.QueueSize, cfg.Bot.RequestsPerMinute, exec, logger)
+	bot := feishu.NewSecure(cfg.Feishu.AppID, cfg.Feishu.AppSecret, cfg.Feishu.EncryptKey, cfg.Feishu.VerificationToken, cfg.Bot.AdminChatID, cfg.Bot.AllowAllUsers, cfg.Bot.RequireMentionInGroup, cfg.Bot.Workers, cfg.Bot.QueueSize, cfg.Bot.RequestsPerMinute, exec, logger)
 	bot.SetReplyOutbox(st)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

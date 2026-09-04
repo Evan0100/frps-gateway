@@ -40,9 +40,10 @@
 
 1. 先部署包含状态持久化改动的新 frps；dashboard/API 保持本机监听，确认 Basic Auth 和通信 token 已配置。
 2. 启动 frps，检查状态文件可写，使用本机管理 API完成增删和重启恢复测试。
-3. 部署 gateway，配置公司 `tenantKey`、默认 4h、最大 24h、每人最多 3 个有效 IP、`enabled=true`。
+3. 部署 gateway，配置默认 4h、最大 24h、每人最多 3 个有效 IP、`enabled=true`，并在飞书开放平台限制应用可用范围。
 4. 启动 gateway，确认 `/healthz` 返回 200，且 `/readyz` 在 SQLite 和 frps 正常时返回 200、停止 frps 后返回 503；两个端点仅供反向代理或监控访问。
-5. 在公司飞书中完成一次完整授权，并验证 SQLite 用户记录、frps 条目和实际业务访问一致。
+5. 飞书事件配置订阅 `im.message.receive_v1`，回调配置订阅 `card.action.trigger`，两者均选择长连接并发布应用版本。
+6. 在公司飞书中发送 `/start`，验证“我的授权”和“撤销授权”按钮，再完成一次手动授权并确认 SQLite 用户记录、frps 条目和实际业务访问一致。
 6. 检查云安全组：443 和明确需要的业务端口开放；frps 管理端口、gateway 8080 不对公网开放。
 
 ## 6. 快速停用与事故处置

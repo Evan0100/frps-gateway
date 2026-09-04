@@ -16,7 +16,7 @@
 
 1. frps 全局 IP allowlist 与过期清理。
 2. `GET/POST/DELETE /api/v2/whitelist` 管理接口，复用 dashboard Basic Auth。
-3. 飞书机器人支持加白、删白、查询和帮助指令。
+3. 飞书机器人通过 `/start` 动态卡片提供申请、查询和撤销访问操作。
 4. 网页查看白名单、操作者和时间信息。
 5. 一次性授权链接自动获取用户公网 IP。
 

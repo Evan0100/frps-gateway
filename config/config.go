@@ -47,7 +47,6 @@ type Frps struct {
 
 type Feishu struct {
 	AppID                 string `toml:"appID"`
-	TenantKey             string `toml:"tenantKey"`
 	AppSecret             string `toml:"appSecret"`
 	AppSecretEnv          string `toml:"appSecretEnv"`
 	AppSecretFile         string `toml:"appSecretFile"`
@@ -60,18 +59,17 @@ type Feishu struct {
 }
 
 type Bot struct {
-	AdminChatID           string   `toml:"adminChatID"`
-	AdminOpenIDs          []string `toml:"adminOpenIDs"`
-	DefaultTTL            string   `toml:"defaultTTL"`
-	MaxTTL                string   `toml:"maxTTL"`
-	LinkTTL               string   `toml:"linkTTL"`
-	AllowAllUsers         bool     `toml:"allowAllUsers"`
-	RequireMentionInGroup bool     `toml:"requireMentionInGroup"`
-	Workers               int      `toml:"workers"`
-	QueueSize             int      `toml:"queueSize"`
-	RequestsPerMinute     int      `toml:"requestsPerMinute"`
-	MaxActiveIPs          int      `toml:"maxActiveIPs"`
-	Enabled               *bool    `toml:"enabled"`
+	AdminChatID           string `toml:"adminChatID"`
+	DefaultTTL            string `toml:"defaultTTL"`
+	MaxTTL                string `toml:"maxTTL"`
+	LinkTTL               string `toml:"linkTTL"`
+	AllowAllUsers         bool   `toml:"allowAllUsers"`
+	RequireMentionInGroup bool   `toml:"requireMentionInGroup"`
+	Workers               int    `toml:"workers"`
+	QueueSize             int    `toml:"queueSize"`
+	RequestsPerMinute     int    `toml:"requestsPerMinute"`
+	MaxActiveIPs          int    `toml:"maxActiveIPs"`
+	Enabled               *bool  `toml:"enabled"`
 
 	defaultTTL time.Duration
 	maxTTL     time.Duration
@@ -134,11 +132,8 @@ func (c *Config) validate() error {
 	if c.Feishu.AppID == "" || c.Feishu.AppSecret == "" {
 		return fmt.Errorf("config error: feishu.appID and feishu.appSecret are required")
 	}
-	if len(c.Bot.AdminOpenIDs) == 0 && c.Bot.AdminChatID == "" && !c.Bot.AllowAllUsers {
-		return fmt.Errorf("config error: configure bot.adminOpenIDs or enable bot.allowAllUsers")
-	}
-	if len(c.Bot.AdminOpenIDs) > 0 && c.Bot.AdminChatID != "" {
-		return fmt.Errorf("config error: bot.adminChatID and bot.adminOpenIDs are mutually exclusive")
+	if c.Bot.AdminChatID == "" && !c.Bot.AllowAllUsers {
+		return fmt.Errorf("config error: configure bot.adminChatID or enable bot.allowAllUsers")
 	}
 	ttl, err := duration.Parse(c.Bot.DefaultTTL)
 	if err != nil || ttl <= 0 {

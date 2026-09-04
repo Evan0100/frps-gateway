@@ -68,7 +68,7 @@ password = "b"
 appID = "x"
 appSecret = "y"
 [bot]
-adminOpenIDs = ["ou_1"]
+allowAllUsers = true
 defaultTTL = "2h"`},
 		{"missing feishu credentials", `
 [frps]
@@ -78,10 +78,9 @@ password = "b"
 [feishu]
 appSecret = "y"
 [bot]
-adminOpenIDs = ["ou_1"]
+allowAllUsers = true
 defaultTTL = "2h"`},
 		{"no admin config", base + `defaultTTL = "2h"` + "\n"},
-		{"both admin configs", base + "adminChatID = \"oc_1\"\nadminOpenIDs = [\"ou_1\"]\ndefaultTTL = \"2h\"\n"},
 		{"bad defaultTTL", base + "adminChatID = \"oc_1\"\ndefaultTTL = \"abc\"\n"},
 		{"empty defaultTTL", base + "adminChatID = \"oc_1\"\n"},
 	}

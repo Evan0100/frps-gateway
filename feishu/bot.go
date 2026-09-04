@@ -1,5 +1,5 @@
 // Package feishu connects to Feishu via the official SDK long-connection
-// mode, filters messages by admin and dispatches them to an Executor.
+// mode, filters messages by configured audience and dispatches them to an Executor.
 package feishu
 
 import (
@@ -9,15 +9,19 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
+	"strings"
 	"sync"
 	"time"
 
 	lark "github.com/larksuite/oapi-sdk-go/v3"
 	larkcore "github.com/larksuite/oapi-sdk-go/v3/core"
 	"github.com/larksuite/oapi-sdk-go/v3/event/dispatcher"
+	"github.com/larksuite/oapi-sdk-go/v3/event/dispatcher/callback"
 	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
 	larkws "github.com/larksuite/oapi-sdk-go/v3/ws"
 
+	"frps-gateway/command"
 	"frps-gateway/interaction"
 	"frps-gateway/store"
 )
@@ -36,14 +40,15 @@ type ReplyOutbox interface {
 	ClaimInbox(context.Context) (store.InboxEvent, bool, error)
 	CompleteInbox(context.Context, string) error
 	RetryInbox(context.Context, string, int) error
+	ListUser(context.Context, string) ([]store.Grant, error)
 }
+
+const interactiveReplyPrefix = "__FRPS_GATEWAY_INTERACTIVE_V1__:"
 
 type Bot struct {
 	appID             string
 	appSecret         string
-	tenantKey         string
 	adminChatID       string
-	adminOpenIDs      map[string]bool
 	api               *lark.Client
 	exec              Executor
 	logger            *slog.Logger
@@ -60,30 +65,22 @@ type Bot struct {
 	inboxWorkers      int
 }
 
-// New creates a Bot. Exactly one of adminChatID / adminOpenIDs must be set
-// (enforced by config validation): chat mode accepts every message from that
-// chat, open-id mode accepts messages from those users only.
-func New(appID, appSecret, adminChatID string, adminOpenIDs []string, exec Executor, logger *slog.Logger) *Bot {
-	return NewSecure(appID, appSecret, "", "", "", adminChatID, adminOpenIDs, false, true, 4, 100, 10, exec, logger)
+// New creates a Bot restricted to one configured chat.
+func New(appID, appSecret, adminChatID string, exec Executor, logger *slog.Logger) *Bot {
+	return NewSecure(appID, appSecret, "", "", adminChatID, false, true, 4, 100, 10, exec, logger)
 }
 
 // SetReplyOutbox enables durable reply delivery and retry.
 func (b *Bot) SetReplyOutbox(outbox ReplyOutbox) { b.outbox = outbox }
-func NewSecure(appID, appSecret, tenantKey, encryptKey, verificationToken, adminChatID string, adminOpenIDs []string, allowAll, requireMention bool, workers, queueSize, rpm int, exec Executor, logger *slog.Logger) *Bot {
-	opens := make(map[string]bool, len(adminOpenIDs))
-	for _, id := range adminOpenIDs {
-		opens[id] = true
-	}
+func NewSecure(appID, appSecret, encryptKey, verificationToken, adminChatID string, allowAll, requireMention bool, workers, queueSize, rpm int, exec Executor, logger *slog.Logger) *Bot {
 	b := &Bot{
-		appID:        appID,
-		appSecret:    appSecret,
-		tenantKey:    tenantKey,
-		adminChatID:  adminChatID,
-		adminOpenIDs: opens,
-		api:          lark.NewClient(appID, appSecret),
-		exec:         exec,
-		logger:       logger,
-		encryptKey:   encryptKey, verificationToken: verificationToken,
+		appID:       appID,
+		appSecret:   appSecret,
+		adminChatID: adminChatID,
+		api:         lark.NewClient(appID, appSecret),
+		exec:        exec,
+		logger:      logger,
+		encryptKey:  encryptKey, verificationToken: verificationToken,
 		allowAllUsers: allowAll, requireMention: requireMention, queue: make(chan *larkim.P2MessageReceiveV1, queueSize), requestsPerMinute: rpm, rate: map[string][]time.Time{},
 		inboxWorkers: workers,
 	}
@@ -107,7 +104,8 @@ func (b *Bot) Run(ctx context.Context) error {
 		}
 	}
 	d := dispatcher.NewEventDispatcher(b.verificationToken, b.encryptKey).
-		OnP2MessageReceiveV1(b.onMessage)
+		OnP2MessageReceiveV1(b.onMessage).
+		OnP2CardActionTrigger(b.onCardAction)
 	cli := larkws.NewClient(b.appID, b.appSecret,
 		larkws.WithEventHandler(d),
 		larkws.WithLogLevel(larkcore.LogLevelInfo),
@@ -150,10 +148,6 @@ func (b *Bot) handle(e *larkim.P2MessageReceiveV1) error {
 		b.logger.Warn("ignore event for unexpected app")
 		return nil
 	}
-	if b.tenantKey != "" && e.EventV2Base.Header.TenantKey != b.tenantKey {
-		b.logger.Warn("ignore event from unexpected tenant", "tenant_key", e.EventV2Base.Header.TenantKey)
-		return nil
-	}
 	msg := e.Event.Message
 	sender := e.Event.Sender
 
@@ -166,7 +160,7 @@ func (b *Bot) handle(e *larkim.P2MessageReceiveV1) error {
 	}
 	openID := deref(sender.SenderId.OpenId)
 	chatID := deref(msg.ChatId)
-	if !b.allowAllUsers && !b.isAdmin(openID, chatID) {
+	if !b.allowAllUsers && chatID != b.adminChatID {
 		b.logger.Warn("ignore message from unauthorized user", "open_id", openID, "chat_id", chatID)
 		return nil
 	}
@@ -182,6 +176,9 @@ func (b *Bot) handle(e *larkim.P2MessageReceiveV1) error {
 		return nil
 	}
 	b.logger.Info("handle command", "open_id", openID, "chat_id", chatID, "message_id", deref(msg.MessageId))
+	if cmd, parseErr := command.Parse(text); parseErr == nil && cmd.Action == command.ActionMenu {
+		return b.deliverCard(ctx, deref(msg.MessageId)+":menu", chatID, menuCard())
+	}
 
 	reply := b.exec.Execute(ctx, interaction.Request{
 		Text:           text,
@@ -190,6 +187,77 @@ func (b *Bot) handle(e *larkim.P2MessageReceiveV1) error {
 		MessageID:      deref(msg.MessageId),
 	})
 	return b.deliverReply(ctx, deref(msg.MessageId), chatID, reply)
+}
+
+func (b *Bot) onCardAction(ctx context.Context, event *callback.CardActionTriggerEvent) (*callback.CardActionTriggerResponse, error) {
+	if event == nil || event.EventV2Base == nil || event.EventV2Base.Header == nil || event.Event == nil || event.Event.Operator == nil || event.Event.Action == nil || event.Event.Context == nil {
+		return toastResponse("error", "无效的卡片操作"), nil
+	}
+	if event.EventV2Base.Header.AppID != b.appID {
+		b.logger.Warn("ignore card action for unexpected app")
+		return toastResponse("error", "应用校验失败"), nil
+	}
+	openID := event.Event.Operator.OpenID
+	chatID := event.Event.Context.OpenChatID
+	if openID == "" || chatID == "" {
+		return toastResponse("error", "无法识别操作者"), nil
+	}
+	if !b.allowAllUsers && chatID != b.adminChatID {
+		b.logger.Warn("ignore card action from unauthorized user", "open_id", openID, "chat_id", chatID)
+		return toastResponse("error", "你不在允许使用范围内"), nil
+	}
+	if !b.allow(openID) {
+		return toastResponse("warning", "操作太频繁，请稍后再试"), nil
+	}
+	action, _ := event.Event.Action.Value["action"].(string)
+	actionIP, _ := event.Event.Action.Value["ip"].(string)
+	eventID := event.EventV2Base.Header.EventID
+	if eventID == "" {
+		eventID = event.Event.Context.OpenMessageID + ":" + action + ":" + actionIP
+	}
+	switch action {
+	case "apply":
+		return cardResponse(applyInstructionsCard()), nil
+	case "list":
+		grants, err := b.userGrants(ctx, openID)
+		if err != nil {
+			b.logger.Warn("list grants from card", "open_id", openID, "err", err)
+			return toastResponse("error", "查询失败，请稍后重试"), nil
+		}
+		return cardResponse(grantsCard(grants, false)), nil
+	case "revoke_menu":
+		grants, err := b.userGrants(ctx, openID)
+		if err != nil {
+			b.logger.Warn("list revocable grants", "open_id", openID, "err", err)
+			return toastResponse("error", "查询失败，请稍后重试"), nil
+		}
+		return cardResponse(grantsCard(grants, true)), nil
+	case "revoke":
+		if net.ParseIP(actionIP) == nil {
+			return toastResponse("error", "无效的 IP 地址"), nil
+		}
+		reply := b.exec.Execute(ctx, interaction.Request{Text: "撤销授权 " + actionIP, OperatorOpenID: openID, ChatID: chatID, MessageID: eventID})
+		grants, err := b.userGrants(ctx, openID)
+		if err != nil {
+			return toastResponse("warning", reply), nil
+		}
+		resp := cardResponse(grantsCard(grants, true))
+		resp.Toast = &callback.Toast{Type: "success", Content: reply}
+		return resp, nil
+	case "menu":
+		return cardResponse(menuCard()), nil
+	default:
+		return toastResponse("error", "不支持的操作"), nil
+	}
+}
+
+func (b *Bot) userGrants(ctx context.Context, openID string) ([]store.Grant, error) {
+	if b.outbox == nil {
+		return nil, errors.New("grant store unavailable")
+	}
+	queryCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	return b.outbox.ListUser(queryCtx, openID)
 }
 
 func mentionsBot(mentions []*larkim.MentionEvent) bool {
@@ -203,7 +271,7 @@ func mentionsBot(mentions []*larkim.MentionEvent) bool {
 
 func (b *Bot) deliverReply(ctx context.Context, id, chatID, reply string) error {
 	if b.outbox == nil {
-		if err := b.sendText(ctx, id, chatID, reply); err != nil {
+		if err := b.sendReply(ctx, id, chatID, reply); err != nil {
 			b.logger.Error("send reply failed", "chat_id", chatID, "err", err)
 		}
 		return nil
@@ -213,6 +281,18 @@ func (b *Bot) deliverReply(ctx context.Context, id, chatID, reply string) error 
 		return err
 	}
 	return nil
+}
+
+func (b *Bot) deliverCard(ctx context.Context, id, chatID string, card map[string]interface{}) error {
+	content, err := json.Marshal(card)
+	if err != nil {
+		return err
+	}
+	payload := interactiveReplyPrefix + string(content)
+	if b.outbox == nil {
+		return b.sendReply(ctx, id, chatID, payload)
+	}
+	return b.outbox.EnqueueReply(ctx, id, chatID, payload)
 }
 
 func (b *Bot) runInbox(ctx context.Context) {
@@ -265,7 +345,7 @@ func (b *Bot) flushReplies(ctx context.Context) {
 	}
 	for _, item := range items {
 		sendCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
-		err = b.sendText(sendCtx, item.ID, item.ChatID, item.Text)
+		err = b.sendReply(sendCtx, item.ID, item.ChatID, item.Text)
 		cancel()
 		if err == nil {
 			if markErr := b.outbox.MarkReplySent(ctx, item.ID); markErr != nil {
@@ -312,13 +392,6 @@ func (b *Bot) allow(id string) bool {
 	return true
 }
 
-func (b *Bot) isAdmin(openID, chatID string) bool {
-	if b.adminChatID != "" {
-		return chatID == b.adminChatID
-	}
-	return b.adminOpenIDs[openID]
-}
-
 func extractText(content string) (string, error) {
 	var c struct {
 		Text string `json:"text"`
@@ -329,15 +402,26 @@ func extractText(content string) (string, error) {
 	return c.Text, nil
 }
 
-func (b *Bot) sendText(ctx context.Context, id, chatID, text string) error {
-	content, err := json.Marshal(map[string]string{"text": text})
-	if err != nil {
-		return err
+func (b *Bot) sendReply(ctx context.Context, id, chatID, reply string) error {
+	msgType := "text"
+	var content string
+	if strings.HasPrefix(reply, interactiveReplyPrefix) {
+		msgType = "interactive"
+		content = strings.TrimPrefix(reply, interactiveReplyPrefix)
+		if !json.Valid([]byte(content)) {
+			return errors.New("invalid interactive card JSON")
+		}
+	} else {
+		encoded, err := json.Marshal(map[string]string{"text": reply})
+		if err != nil {
+			return err
+		}
+		content = string(encoded)
 	}
 	body := larkim.NewCreateMessageReqBodyBuilder().
 		ReceiveId(chatID).
-		MsgType("text").
-		Content(string(content)).
+		MsgType(msgType).
+		Content(content).
 		Uuid(deliveryUUID(id)).
 		Build()
 	req := larkim.NewCreateMessageReqBuilder().

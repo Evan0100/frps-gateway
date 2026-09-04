@@ -14,8 +14,6 @@ passwordEnv = "FRPS_GATEWAY_FRPS_PASSWORD"
 [feishu]
 # 飞书企业自建应用的凭证（开放平台 > 凭证与基础信息）
 appID = "cli_xxxxxxxx"
-# 建议填写本企业 tenant key；填写后会拒绝其他租户的事件。
-tenantKey = "tenant_xxxxxxxx"
 appSecretEnv = "FRPS_GATEWAY_FEISHU_APP_SECRET"
 # appSecretFile = "./secrets/feishu-app-secret"
 # appSecret = "仅限本地开发"
@@ -30,16 +28,10 @@ enabled = true
 allowAllUsers = true
 # 群聊必须 @机器人，私聊无需 @。
 requireMentionInGroup = true
-# 管理员列表（预留给查看全量记录等管理操作）；不要使用“整群都是管理员”。
-adminOpenIDs = ["ou_xxxxxxxx"]
-# 兼容旧配置：adminChatID 与 adminOpenIDs 只能二选一，不建议新部署使用。
-#   adminChatID  —— 指定一个飞书群（oc_ 开头），群内 @机器人 的消息都受理，群成员即管理员。
-#                   推荐：入职拉群、离职踢群，名单零维护。
-#   adminOpenIDs —— 管理员的 open_id 列表（ou_ 开头），这些用户的私聊消息才受理。
-# 注意：同一员工在不同租户中的 open_id 不同，切换租户时需换成对应租户的值。
+# 如果 allowAllUsers=false，则仅受理这个群中的消息。
 # adminChatID = "oc_xxxxxxxx"
 
-# 「加白」不带有效期时默认 4h；员工授权最大 24h。
+# 「申请授权」不带有效期时默认 4h；员工授权最大 24h。
 defaultTTL = "4h"
 maxTTL = "24h"
 maxActiveIPs = 3
