@@ -100,6 +100,9 @@ func parseAdd(args []string) (*Command, error) {
 	if ip == nil {
 		return &Command{Action: ActionHelp}, fmt.Errorf("%q 不是合法的 IP 地址", args[0])
 	}
+	if !ip.IsGlobalUnicast() || ip.IsPrivate() || ip.IsLoopback() || ip.IsLinkLocalUnicast() {
+		return &Command{Action: ActionHelp}, fmt.Errorf("%q 不是可授权的公网 IP 地址", args[0])
+	}
 	var ttl time.Duration
 	if len(args) == 2 {
 		t, err := duration.Parse(args[1])

@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	"frps-gateway/admin"
 	"frps-gateway/authorize"
 	"frps-gateway/config"
 	"frps-gateway/executor"
@@ -47,7 +48,23 @@ func main() {
 	}
 	exec := executor.NewManaged(client, st, auth, cfg.Bot.TTL(), cfg.Bot.MaxTTLDuration(), cfg.Bot.LinkTTLDuration(), cfg.Bot.MaxActiveIPs, logger)
 	auth.SetReadiness(exec.Ready)
+	if cfg.Admin.Enabled {
+		adminHandler, err := admin.New(st, client, exec, cfg.Admin.User, cfg.Admin.Password, cfg.Server.PublicBaseURL, cfg.Admin.SessionTTLDuration(), cfg.Admin.MaxGrantTTLDuration(), admin.KnockConfig{
+			Secret: cfg.Admin.KnockSecret,
+			Hits:   cfg.Admin.KnockHits,
+			Window: cfg.Admin.KnockWindowDuration(),
+			TTL:    cfg.Admin.KnockTTLDuration(),
+		}, logger)
+		if err != nil {
+			logger.Error("configure admin console", "err", err)
+			os.Exit(1)
+		}
+		auth.SetAdminHandler(adminHandler)
+		logger.Info("gateway admin console enabled", "path", "/admin")
+	}
 	bot := feishu.NewSecure(cfg.Feishu.AppID, cfg.Feishu.AppSecret, cfg.Feishu.EncryptKey, cfg.Feishu.VerificationToken, cfg.Bot.AdminChatID, cfg.Bot.AllowAllUsers, cfg.Bot.RequireMentionInGroup, cfg.Bot.Workers, cfg.Bot.QueueSize, cfg.Bot.RequestsPerMinute, exec, logger)
+	bot.SetDefaultTTL(cfg.Bot.DefaultTTL)
+	bot.SetLinkTTL(cfg.Bot.LinkTTL)
 	bot.SetReplyOutbox(st)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

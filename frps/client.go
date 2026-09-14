@@ -43,7 +43,12 @@ func New(apiAddr, user, password string) *Client {
 		baseURL:  strings.TrimRight(apiAddr, "/"),
 		user:     user,
 		password: password,
-		hc:       &http.Client{Timeout: 15 * time.Second},
+		hc: &http.Client{
+			Timeout: 15 * time.Second,
+			CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
+		},
 	}
 }
 
@@ -129,6 +134,7 @@ func (c *Client) doLimit(ctx context.Context, method, path string, body any, out
 		return err
 	}
 	req.SetBasicAuth(c.user, c.password)
+	req.Header.Set("Accept", "application/json")
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}

@@ -51,6 +51,27 @@ trustedProxyCIDRs = ["127.0.0.0/8"]
 # tlsCertFile = "./cert.pem"
 # tlsKeyFile = "./key.pem"
 
+[admin]
+# gateway 独立管理后台。它管理 SQLite 授权和审计；frps /whitelist 仅作应急控制台。
+enabled = true
+user = "gateway-admin"
+# 必须与 frps dashboard 密码不同；生产环境推荐环境变量或受限文件。
+passwordEnv = "FRPS_GATEWAY_ADMIN_PASSWORD"
+# passwordFile = "./secrets/admin-password"
+# password = "仅限本地开发"
+# 登录会话仅保存在内存中，gateway 重启后需重新登录。
+sessionTTL = "8h"
+# 管理员单次授权/延期的最大有效期。
+maxGrantTTL = "24h"
+# 可选敲门层：未完成敲门时 /admin 与 /admin/login 返回空 404。
+# 访问 /admin/knock/<secret> 达到 knockHits 次后，登录页临时开放 knockTTL。
+# secret 至少 24 个字符，只能包含字母、数字、-、_；必须随机生成且不要与任何密码复用。
+knockSecretEnv = "FRPS_GATEWAY_ADMIN_KNOCK_SECRET"
+# knockSecretFile = "./secrets/admin-knock-secret"
+knockHits = 3
+knockWindow = "30s"
+knockTTL = "5m"
+
 [storage]
 sqliteFile = "./data/frps-gateway.db"
 

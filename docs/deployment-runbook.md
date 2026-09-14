@@ -5,6 +5,9 @@
 - 公网只开放业务所需端口和 TCP 443；不得公开 frps dashboard/API 端口。
 - frps dashboard/API 与 gateway 授权服务均监听 `127.0.0.1`。
 - 由现有 Nginx/Caddy 在 443 终结 TLS并自动续期证书，再反向代理到 `127.0.0.1:8080`。
+- `/admin` 只允许 VPN、管理网或反向代理身份层访问；不要仅靠路径不公开来保护后台。条件允许时在反向代理增加 SSO/MFA 和独立登录限速。
+- 反向代理应设置 HSTS，并保留 gateway 返回的 CSP、`X-Frame-Options`、`Permissions-Policy` 和 `Cache-Control: no-store`，不要缓存 `/admin` 与 `/authorize`。
+- 启用后台敲门时，对 `/admin/knock/` 关闭或脱敏访问日志并设置来源限速，避免 secret 进入代理日志、APM、浏览器同步和工单截图。敲门只做隐藏层，不能替代 VPN、SSO/MFA 或管理网 ACL。
 - `trustedProxyCIDRs` 只配置实际反向代理地址，单机部署通常为 `127.0.0.0/8`，禁止配置 `0.0.0.0/0`。
 - 对外 HTTP 服务仍应逐个配置 frpc 的 `httpUser/httpPassword`，它与 IP 白名单互相独立，尤其适用于公司 NAT、酒店和 CGNAT 等共享出口。
 
@@ -19,6 +22,8 @@
 
 - `FRPS_GATEWAY_FRPS_PASSWORD`：frps dashboard/API Basic Auth 密码。
 - `FRPS_GATEWAY_FEISHU_APP_SECRET`：飞书 AppSecret。
+- `FRPS_GATEWAY_ADMIN_PASSWORD`：gateway 独立管理后台密码，至少 16 个字符且不得复用 frps dashboard 密码。
+- `FRPS_GATEWAY_ADMIN_KNOCK_SECRET`：可选后台敲门 secret，至少 24 个随机字符，不得复用任何密码。
 - 推荐由 systemd `EnvironmentFile` 或权限为 `0600` 的独立文件提供；服务配置和代码仓库不得包含真实值。
 - frps 通信 token、上述密码和 AppSecret 使用不同随机值。发生主机入侵、人员离职或疑似泄露时立即轮换；常规至少每 90 天复核并轮换高权限凭据。
 - 一次性授权链接不使用长期签名密钥：令牌来自系统加密随机源，SQLite 只保存 SHA-256，因此没有需要保存的签名密钥。
@@ -40,11 +45,12 @@
 
 1. 先部署包含状态持久化改动的新 frps；dashboard/API 保持本机监听，确认 Basic Auth 和通信 token 已配置。
 2. 启动 frps，检查状态文件可写，使用本机管理 API完成增删和重启恢复测试。
-3. 部署 gateway，配置默认 4h、最大 24h、每人最多 3 个有效 IP、`enabled=true`，并在飞书开放平台限制应用可用范围。
+3. 部署 gateway，配置默认 4h、最大 24h、每人最多 3 个有效 IP、`enabled=true`，并在飞书开放平台限制应用可用范围。需要后台时启用 `[admin]`，通过环境变量或受限文件提供独立密码。
 4. 启动 gateway，确认 `/healthz` 返回 200，且 `/readyz` 在 SQLite 和 frps 正常时返回 200、停止 frps 后返回 503；两个端点仅供反向代理或监控访问。
 5. 飞书事件配置订阅 `im.message.receive_v1`，回调配置订阅 `card.action.trigger`，两者均选择长连接并发布应用版本。
 6. 在公司飞书中发送 `/start`，验证“我的授权”和“撤销授权”按钮，再完成一次手动授权并确认 SQLite 用户记录、frps 条目和实际业务访问一致。
-6. 检查云安全组：443 和明确需要的业务端口开放；frps 管理端口、gateway 8080 不对公网开放。
+7. 通过受控管理网络登录 `/admin`，验证 CSRF 保护、授权新增/延期/撤销、手工 frps 条目标记以及审计结果；确认 frps `/whitelist` 仅作为应急入口。
+8. 检查云安全组：443 和明确需要的业务端口开放；frps 管理端口、gateway 8080 不对公网开放。
 
 ## 6. 快速停用与事故处置
 

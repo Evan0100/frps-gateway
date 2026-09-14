@@ -94,6 +94,23 @@ func TestClientRejectsRawV1Shape(t *testing.T) {
 	}
 }
 
+func TestClientDoesNotFollowRedirects(t *testing.T) {
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		http.Redirect(w, r, "/redirected", http.StatusFound)
+	}))
+	defer server.Close()
+	_, err := New(server.URL, "admin", "secret").List(context.Background())
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) || apiErr.Status != http.StatusFound {
+		t.Fatalf("err=%v, want redirect API error", err)
+	}
+	if requests != 1 {
+		t.Fatalf("requests=%d, redirect was followed", requests)
+	}
+}
+
 func assertBasicAuth(t *testing.T, r *http.Request) {
 	t.Helper()
 	user, password, ok := r.BasicAuth()

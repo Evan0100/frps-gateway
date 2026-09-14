@@ -6,14 +6,18 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
-	_ "modernc.org/sqlite"
+	"modernc.org/sqlite"
+	sqlite3 "modernc.org/sqlite/lib"
 )
 
 var (
 	ErrTokenInvalid  = errors.New("authorization token is invalid, expired, or already used")
 	ErrActiveIPLimit = errors.New("active IP limit reached")
+	ErrGrantNotFound = errors.New("grant not found")
+	ErrGrantInactive = errors.New("grant is not active")
 )
 
 type Store struct{ db *sql.DB }
@@ -32,6 +36,39 @@ type InboxEvent struct {
 type Grant struct {
 	OpenID, OperatorName, IP, Source string
 	CreatedAt, ExpireAt              time.Time
+}
+
+type GrantRecord struct {
+	ID                               int64
+	OpenID, OperatorName, IP, Source string
+	CreatedAt, ExpireAt              time.Time
+	RevokedAt                        *time.Time
+}
+
+type GrantFilter struct {
+	IP, User, Status string
+	From, To         time.Time
+	Limit, Offset    int
+}
+
+type AccessFilter struct {
+	IP, User, Action string
+	From, To         time.Time
+	Limit, Offset    int
+}
+
+type AdminAudit struct {
+	ID, GrantID                             int64
+	Actor, Action, TargetOpenID, TargetName string
+	IP, Source, Result, Detail              string
+	CreatedAt                               time.Time
+	ExpireAt                                *time.Time
+}
+
+type AuditFilter struct {
+	IP, Actor, Action string
+	From, To          time.Time
+	Limit, Offset     int
 }
 
 func Open(path string) (*Store, error) {
@@ -54,9 +91,13 @@ CREATE TABLE IF NOT EXISTS reply_outbox(id TEXT PRIMARY KEY, chat_id TEXT NOT NU
 CREATE INDEX IF NOT EXISTS reply_outbox_pending ON reply_outbox(sent_at,next_attempt_at);
 CREATE TABLE IF NOT EXISTS bot_inbox(id TEXT PRIMARY KEY, payload BLOB NOT NULL, status TEXT NOT NULL DEFAULT 'pending', attempts INTEGER NOT NULL DEFAULT 0, next_attempt_at INTEGER NOT NULL, created_at INTEGER NOT NULL, completed_at INTEGER);
 CREATE INDEX IF NOT EXISTS bot_inbox_pending ON bot_inbox(status,next_attempt_at);
+CREATE TABLE IF NOT EXISTS admin_audit(id INTEGER PRIMARY KEY, actor TEXT NOT NULL, action TEXT NOT NULL, grant_id INTEGER NOT NULL DEFAULT 0, target_open_id TEXT NOT NULL DEFAULT '', target_name TEXT NOT NULL DEFAULT '', ip TEXT NOT NULL DEFAULT '', source TEXT NOT NULL DEFAULT 'admin_web', created_at INTEGER NOT NULL, expire_at INTEGER, result TEXT NOT NULL, detail TEXT NOT NULL DEFAULT '');
+CREATE INDEX IF NOT EXISTS admin_audit_time ON admin_audit(created_at);
+CREATE INDEX IF NOT EXISTS admin_audit_ip ON admin_audit(ip, created_at);
 INSERT OR IGNORE INTO schema_migrations(version,applied_at) VALUES(1,strftime('%s','now'));
 INSERT OR IGNORE INTO schema_migrations(version,applied_at) VALUES(2,strftime('%s','now'));
 INSERT OR IGNORE INTO schema_migrations(version,applied_at) VALUES(3,strftime('%s','now'));
+INSERT OR IGNORE INTO schema_migrations(version,applied_at) VALUES(4,strftime('%s','now'));
 UPDATE bot_inbox SET status='pending' WHERE status='processing';`); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("migrate sqlite: %w", err)
@@ -190,6 +231,16 @@ func (s *Store) CreateToken(ctx context.Context, raw []byte, openID, name, messa
 	return err
 }
 
+// IsUniqueViolation reports whether err is a SQLite UNIQUE constraint failure,
+// e.g. re-creating a one-time token for a redelivered event.
+func IsUniqueViolation(err error) bool {
+	var se *sqlite.Error
+	if !errors.As(err, &se) {
+		return false
+	}
+	return se.Code() == sqlite3.SQLITE_CONSTRAINT_UNIQUE || se.Code() == sqlite3.SQLITE_CONSTRAINT
+}
+
 func (s *Store) ValidateToken(ctx context.Context, raw []byte) error {
 	h := sha256.Sum256(raw)
 	var one int
@@ -201,44 +252,94 @@ func (s *Store) ValidateToken(ctx context.Context, raw []byte) error {
 }
 
 func (s *Store) ConsumeToken(ctx context.Context, raw []byte, ip string, maxActiveIPs int) (Grant, error) {
+	gs, err := s.ConsumeTokenIPs(ctx, raw, []string{ip}, maxActiveIPs)
+	if err != nil {
+		return Grant{}, err
+	}
+	return gs[0], nil
+}
+
+// ConsumeTokenIPs atomically consumes a one-time token and records one grant
+// per deduplicated target IP. The active-IP limit counts existing grants
+// (excluding the targets themselves) plus all new addresses.
+func (s *Store) ConsumeTokenIPs(ctx context.Context, raw []byte, ips []string, maxActiveIPs int) ([]Grant, error) {
+	seen := make(map[string]bool, len(ips))
+	var targets []string
+	for _, ip := range ips {
+		if !seen[ip] {
+			seen[ip] = true
+			targets = append(targets, ip)
+		}
+	}
+	if len(targets) == 0 {
+		return nil, ErrTokenInvalid
+	}
 	h := sha256.Sum256(raw)
 	now := time.Now()
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return Grant{}, err
+		return nil, err
 	}
 	defer tx.Rollback()
 	var g Grant
 	var ttl int64
 	err = tx.QueryRowContext(ctx, `SELECT open_id,operator_name,ttl_seconds FROM auth_tokens WHERE token_hash=? AND used_at IS NULL AND expires_at>=?`, h[:], now.Unix()).Scan(&g.OpenID, &g.OperatorName, &ttl)
 	if errors.Is(err, sql.ErrNoRows) {
-		return Grant{}, ErrTokenInvalid
+		return nil, ErrTokenInvalid
 	}
 	if err != nil {
-		return Grant{}, err
+		return nil, err
 	}
-	g.IP = ip
-	g.Source = "feishu_link"
 	g.CreatedAt = now
 	g.ExpireAt = now.Add(time.Duration(ttl) * time.Second)
-	if err = enforceActiveIPLimit(ctx, tx, g.OpenID, ip, maxActiveIPs, now.Unix()); err != nil {
-		return Grant{}, err
+	if err = enforceActiveIPLimitMulti(ctx, tx, g.OpenID, targets, maxActiveIPs, now.Unix()); err != nil {
+		return nil, err
 	}
 	res, err := tx.ExecContext(ctx, `UPDATE auth_tokens SET used_at=? WHERE token_hash=? AND used_at IS NULL`, now.Unix(), h[:])
 	if err != nil {
-		return Grant{}, err
+		return nil, err
 	}
 	n, _ := res.RowsAffected()
 	if n != 1 {
-		return Grant{}, ErrTokenInvalid
+		return nil, ErrTokenInvalid
 	}
-	if _, err = tx.ExecContext(ctx, `INSERT INTO grants(open_id,operator_name,ip,source,created_at,expire_at) VALUES(?,?,?,?,?,?)`, g.OpenID, g.OperatorName, g.IP, g.Source, g.CreatedAt.Unix(), g.ExpireAt.Unix()); err != nil {
-		return Grant{}, err
+	grants := make([]Grant, 0, len(targets))
+	for _, ip := range targets {
+		g.IP = ip
+		g.Source = "feishu_link"
+		if _, err = tx.ExecContext(ctx, `INSERT INTO grants(open_id,operator_name,ip,source,created_at,expire_at) VALUES(?,?,?,?,?,?)`, g.OpenID, g.OperatorName, g.IP, g.Source, g.CreatedAt.Unix(), g.ExpireAt.Unix()); err != nil {
+			return nil, err
+		}
+		if _, err = tx.ExecContext(ctx, `INSERT INTO managed_ips(ip) VALUES(?) ON CONFLICT(ip) DO NOTHING`, ip); err != nil {
+			return nil, err
+		}
+		grants = append(grants, g)
 	}
-	if _, err = tx.ExecContext(ctx, `INSERT INTO managed_ips(ip) VALUES(?) ON CONFLICT(ip) DO NOTHING`, ip); err != nil {
-		return Grant{}, err
+	return grants, tx.Commit()
+}
+
+// enforceActiveIPLimitMulti rejects the batch when existing active IPs plus
+// the new targets exceed the per-user limit. Re-granting an IP the user
+// already holds refreshes it and does not consume an extra slot.
+func enforceActiveIPLimitMulti(ctx context.Context, tx *sql.Tx, openID string, targets []string, maxActiveIPs int, now int64) error {
+	if maxActiveIPs <= 0 {
+		return nil
 	}
-	return g, tx.Commit()
+	placeholders := strings.Repeat(",?", len(targets))[1:]
+	args := make([]any, 0, 2+len(targets))
+	args = append(args, openID, now)
+	for _, ip := range targets {
+		args = append(args, ip)
+	}
+	var others int
+	err := tx.QueryRowContext(ctx, `SELECT COUNT(DISTINCT ip) FROM grants WHERE open_id=? AND revoked_at IS NULL AND expire_at>? AND ip NOT IN (`+placeholders+`)`, args...).Scan(&others)
+	if err != nil {
+		return err
+	}
+	if others+len(targets) > maxActiveIPs {
+		return ErrActiveIPLimit
+	}
+	return nil
 }
 
 func (s *Store) AddGrant(ctx context.Context, g Grant) error {
@@ -318,6 +419,203 @@ func (s *Store) list(ctx context.Context, where string, args ...any) ([]Grant, e
 	return out, rows.Err()
 }
 
+func normalizePage(limit, offset int) (int, int) {
+	if limit <= 0 {
+		limit = 50
+	}
+	if limit > 200 {
+		limit = 200
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	return limit, offset
+}
+
+// ListGrantRecords returns grant history for the gateway management console.
+func (s *Store) ListGrantRecords(ctx context.Context, f GrantFilter) ([]GrantRecord, int64, error) {
+	now := time.Now().Unix()
+	where := []string{"1=1"}
+	args := []any{}
+	if f.IP != "" {
+		where = append(where, "ip LIKE ?")
+		args = append(args, "%"+f.IP+"%")
+	}
+	if f.User != "" {
+		where = append(where, "(open_id LIKE ? OR operator_name LIKE ?)")
+		args = append(args, "%"+f.User+"%", "%"+f.User+"%")
+	}
+	switch f.Status {
+	case "active":
+		where = append(where, "revoked_at IS NULL AND expire_at>?")
+		args = append(args, now)
+	case "expired":
+		where = append(where, "revoked_at IS NULL AND expire_at<=?")
+		args = append(args, now)
+	case "revoked":
+		where = append(where, "revoked_at IS NOT NULL")
+	}
+	if !f.From.IsZero() {
+		where = append(where, "created_at>=?")
+		args = append(args, f.From.Unix())
+	}
+	if !f.To.IsZero() {
+		where = append(where, "created_at<?")
+		args = append(args, f.To.Unix())
+	}
+	clause := strings.Join(where, " AND ")
+	var total int64
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM grants WHERE `+clause, args...).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+	limit, offset := normalizePage(f.Limit, f.Offset)
+	queryArgs := append(append([]any{}, args...), limit, offset)
+	rows, err := s.db.QueryContext(ctx, `SELECT id,open_id,operator_name,ip,source,created_at,expire_at,revoked_at FROM grants WHERE `+clause+` ORDER BY created_at DESC,id DESC LIMIT ? OFFSET ?`, queryArgs...)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+	var out []GrantRecord
+	for rows.Next() {
+		var g GrantRecord
+		var created, expiry int64
+		var revoked sql.NullInt64
+		if err := rows.Scan(&g.ID, &g.OpenID, &g.OperatorName, &g.IP, &g.Source, &created, &expiry, &revoked); err != nil {
+			return nil, 0, err
+		}
+		g.CreatedAt, g.ExpireAt = time.Unix(created, 0), time.Unix(expiry, 0)
+		if revoked.Valid {
+			v := time.Unix(revoked.Int64, 0)
+			g.RevokedAt = &v
+		}
+		out = append(out, g)
+	}
+	return out, total, rows.Err()
+}
+
+// CreateAdminGrant records a gateway-owned grant and an audit event in the
+// same transaction. The caller updates the audit result after reconciliation.
+func (s *Store) CreateAdminGrant(ctx context.Context, actor string, g Grant) (GrantRecord, int64, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return GrantRecord{}, 0, err
+	}
+	defer tx.Rollback()
+	res, err := tx.ExecContext(ctx, `INSERT INTO grants(open_id,operator_name,ip,source,created_at,expire_at) VALUES(?,?,?,?,?,?)`, g.OpenID, g.OperatorName, g.IP, g.Source, g.CreatedAt.Unix(), g.ExpireAt.Unix())
+	if err != nil {
+		return GrantRecord{}, 0, err
+	}
+	grantID, err := res.LastInsertId()
+	if err != nil {
+		return GrantRecord{}, 0, err
+	}
+	if _, err = tx.ExecContext(ctx, `INSERT INTO managed_ips(ip) VALUES(?) ON CONFLICT(ip) DO NOTHING`, g.IP); err != nil {
+		return GrantRecord{}, 0, err
+	}
+	audit, err := tx.ExecContext(ctx, `INSERT INTO admin_audit(actor,action,grant_id,target_open_id,target_name,ip,source,created_at,expire_at,result) VALUES(?,?,?,?,?,?,?,?,?,?)`, actor, "add", grantID, g.OpenID, g.OperatorName, g.IP, g.Source, time.Now().Unix(), g.ExpireAt.Unix(), "recorded")
+	if err != nil {
+		return GrantRecord{}, 0, err
+	}
+	auditID, err := audit.LastInsertId()
+	if err != nil {
+		return GrantRecord{}, 0, err
+	}
+	if err = tx.Commit(); err != nil {
+		return GrantRecord{}, 0, err
+	}
+	return GrantRecord{ID: grantID, OpenID: g.OpenID, OperatorName: g.OperatorName, IP: g.IP, Source: g.Source, CreatedAt: g.CreatedAt, ExpireAt: g.ExpireAt}, auditID, nil
+}
+
+func (s *Store) ExtendAdminGrant(ctx context.Context, actor string, id int64, expireAt time.Time) (GrantRecord, int64, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return GrantRecord{}, 0, err
+	}
+	defer tx.Rollback()
+	g, err := grantForMutation(ctx, tx, id)
+	if err != nil {
+		return GrantRecord{}, 0, err
+	}
+	if g.RevokedAt != nil || !g.ExpireAt.After(time.Now()) {
+		return GrantRecord{}, 0, ErrGrantInactive
+	}
+	if _, err = tx.ExecContext(ctx, `UPDATE grants SET expire_at=? WHERE id=?`, expireAt.Unix(), id); err != nil {
+		return GrantRecord{}, 0, err
+	}
+	if _, err = tx.ExecContext(ctx, `INSERT INTO managed_ips(ip) VALUES(?) ON CONFLICT(ip) DO NOTHING`, g.IP); err != nil {
+		return GrantRecord{}, 0, err
+	}
+	audit, err := tx.ExecContext(ctx, `INSERT INTO admin_audit(actor,action,grant_id,target_open_id,target_name,ip,source,created_at,expire_at,result) VALUES(?,?,?,?,?,?,?,?,?,?)`, actor, "extend", id, g.OpenID, g.OperatorName, g.IP, "admin_web", time.Now().Unix(), expireAt.Unix(), "recorded")
+	if err != nil {
+		return GrantRecord{}, 0, err
+	}
+	auditID, err := audit.LastInsertId()
+	if err != nil {
+		return GrantRecord{}, 0, err
+	}
+	if err = tx.Commit(); err != nil {
+		return GrantRecord{}, 0, err
+	}
+	g.ExpireAt = expireAt
+	return g, auditID, nil
+}
+
+func (s *Store) RevokeAdminGrant(ctx context.Context, actor string, id int64) (GrantRecord, int64, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return GrantRecord{}, 0, err
+	}
+	defer tx.Rollback()
+	g, err := grantForMutation(ctx, tx, id)
+	if err != nil {
+		return GrantRecord{}, 0, err
+	}
+	if g.RevokedAt != nil || !g.ExpireAt.After(time.Now()) {
+		return GrantRecord{}, 0, ErrGrantInactive
+	}
+	now := time.Now()
+	if _, err = tx.ExecContext(ctx, `UPDATE grants SET revoked_at=? WHERE id=?`, now.Unix(), id); err != nil {
+		return GrantRecord{}, 0, err
+	}
+	audit, err := tx.ExecContext(ctx, `INSERT INTO admin_audit(actor,action,grant_id,target_open_id,target_name,ip,source,created_at,expire_at,result) VALUES(?,?,?,?,?,?,?,?,?,?)`, actor, "revoke", id, g.OpenID, g.OperatorName, g.IP, "admin_web", now.Unix(), g.ExpireAt.Unix(), "recorded")
+	if err != nil {
+		return GrantRecord{}, 0, err
+	}
+	auditID, err := audit.LastInsertId()
+	if err != nil {
+		return GrantRecord{}, 0, err
+	}
+	if err = tx.Commit(); err != nil {
+		return GrantRecord{}, 0, err
+	}
+	g.RevokedAt = &now
+	return g, auditID, nil
+}
+
+func grantForMutation(ctx context.Context, tx *sql.Tx, id int64) (GrantRecord, error) {
+	var g GrantRecord
+	var created, expiry int64
+	var revoked sql.NullInt64
+	err := tx.QueryRowContext(ctx, `SELECT id,open_id,operator_name,ip,source,created_at,expire_at,revoked_at FROM grants WHERE id=?`, id).Scan(&g.ID, &g.OpenID, &g.OperatorName, &g.IP, &g.Source, &created, &expiry, &revoked)
+	if errors.Is(err, sql.ErrNoRows) {
+		return GrantRecord{}, ErrGrantNotFound
+	}
+	if err != nil {
+		return GrantRecord{}, err
+	}
+	g.CreatedAt, g.ExpireAt = time.Unix(created, 0), time.Unix(expiry, 0)
+	if revoked.Valid {
+		v := time.Unix(revoked.Int64, 0)
+		g.RevokedAt = &v
+	}
+	return g, nil
+}
+
+func (s *Store) SetAdminAuditResult(ctx context.Context, id int64, result, detail string) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE admin_audit SET result=?,detail=? WHERE id=?`, result, detail, id)
+	return err
+}
+
 // AccessRecord is one whitelist enforcement decision shipped from frps.
 type AccessRecord struct {
 	Instance string
@@ -378,6 +676,105 @@ func (s *Store) CountAccessRecords(ctx context.Context) (int64, error) {
 	var n int64
 	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM access_records`).Scan(&n)
 	return n, err
+}
+
+func (s *Store) ListAccessRecords(ctx context.Context, f AccessFilter) ([]AccessRecord, int64, error) {
+	where := []string{"1=1"}
+	args := []any{}
+	if f.IP != "" {
+		where = append(where, "ip LIKE ?")
+		args = append(args, "%"+f.IP+"%")
+	}
+	if f.User != "" {
+		where = append(where, "user LIKE ?")
+		args = append(args, "%"+f.User+"%")
+	}
+	if f.Action == "allow" || f.Action == "deny" {
+		where = append(where, "action=?")
+		args = append(args, f.Action)
+	}
+	if !f.From.IsZero() {
+		where = append(where, "time>=?")
+		args = append(args, f.From.Unix())
+	}
+	if !f.To.IsZero() {
+		where = append(where, "time<?")
+		args = append(args, f.To.Unix())
+	}
+	clause := strings.Join(where, " AND ")
+	var total int64
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM access_records WHERE `+clause, args...).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+	limit, offset := normalizePage(f.Limit, f.Offset)
+	queryArgs := append(append([]any{}, args...), limit, offset)
+	rows, err := s.db.QueryContext(ctx, `SELECT instance,seq,time,ip,user,source,action,reason FROM access_records WHERE `+clause+` ORDER BY time DESC,instance DESC,seq DESC LIMIT ? OFFSET ?`, queryArgs...)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+	var out []AccessRecord
+	for rows.Next() {
+		var rec AccessRecord
+		if err := rows.Scan(&rec.Instance, &rec.Seq, &rec.Time, &rec.IP, &rec.User, &rec.Source, &rec.Action, &rec.Reason); err != nil {
+			return nil, 0, err
+		}
+		out = append(out, rec)
+	}
+	return out, total, rows.Err()
+}
+
+func (s *Store) ListAdminAudits(ctx context.Context, f AuditFilter) ([]AdminAudit, int64, error) {
+	where := []string{"1=1"}
+	args := []any{}
+	if f.IP != "" {
+		where = append(where, "ip LIKE ?")
+		args = append(args, "%"+f.IP+"%")
+	}
+	if f.Actor != "" {
+		where = append(where, "actor LIKE ?")
+		args = append(args, "%"+f.Actor+"%")
+	}
+	if f.Action != "" {
+		where = append(where, "action=?")
+		args = append(args, f.Action)
+	}
+	if !f.From.IsZero() {
+		where = append(where, "created_at>=?")
+		args = append(args, f.From.Unix())
+	}
+	if !f.To.IsZero() {
+		where = append(where, "created_at<?")
+		args = append(args, f.To.Unix())
+	}
+	clause := strings.Join(where, " AND ")
+	var total int64
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM admin_audit WHERE `+clause, args...).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+	limit, offset := normalizePage(f.Limit, f.Offset)
+	queryArgs := append(append([]any{}, args...), limit, offset)
+	rows, err := s.db.QueryContext(ctx, `SELECT id,actor,action,grant_id,target_open_id,target_name,ip,source,created_at,expire_at,result,detail FROM admin_audit WHERE `+clause+` ORDER BY created_at DESC,id DESC LIMIT ? OFFSET ?`, queryArgs...)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+	var out []AdminAudit
+	for rows.Next() {
+		var a AdminAudit
+		var created int64
+		var expiry sql.NullInt64
+		if err := rows.Scan(&a.ID, &a.Actor, &a.Action, &a.GrantID, &a.TargetOpenID, &a.TargetName, &a.IP, &a.Source, &created, &expiry, &a.Result, &a.Detail); err != nil {
+			return nil, 0, err
+		}
+		a.CreatedAt = time.Unix(created, 0)
+		if expiry.Valid {
+			v := time.Unix(expiry.Int64, 0)
+			a.ExpireAt = &v
+		}
+		out = append(out, a)
+	}
+	return out, total, rows.Err()
 }
 
 func (s *Store) MaxAccessSequence(ctx context.Context, instance string) (uint64, bool, error) {

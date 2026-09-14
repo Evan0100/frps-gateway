@@ -112,3 +112,34 @@ func TestExecuteServerDown(t *testing.T) {
 		t.Errorf("reply = %q, want it to contain 查询失败", reply)
 	}
 }
+
+type fakeLinkIssuer struct {
+	openID, name, messageID string
+	ttl, validFor           time.Duration
+	url                     string
+	err                     error
+}
+
+func (f *fakeLinkIssuer) NewLink(_ context.Context, openID, name, messageID string, ttl, validFor time.Duration) (string, error) {
+	f.openID, f.name, f.messageID, f.ttl, f.validFor = openID, name, messageID, ttl, validFor
+	return f.url, f.err
+}
+
+func TestAuthorizeLinkPassesIdentityAndTTLs(t *testing.T) {
+	links := &fakeLinkIssuer{url: "https://auth.example.com/authorize/tok"}
+	exec := NewManaged(nil, nil, links, 4*time.Hour, 24*time.Hour, 5*time.Minute, 3, slog.Default())
+	url, err := exec.AuthorizeLink(context.Background(), interaction.Request{OperatorOpenID: "ou_1", OperatorName: "Alice", MessageID: "m1"})
+	if err != nil || url != links.url {
+		t.Fatalf("url=%q err=%v", url, err)
+	}
+	if links.openID != "ou_1" || links.name != "Alice" || links.messageID != "m1" || links.ttl != 4*time.Hour || links.validFor != 5*time.Minute {
+		t.Fatalf("unexpected link issuance: %+v", links)
+	}
+}
+
+func TestAuthorizeLinkWithoutIssuerFails(t *testing.T) {
+	exec := NewManaged(nil, nil, nil, time.Hour, 24*time.Hour, time.Minute, 3, slog.Default())
+	if _, err := exec.AuthorizeLink(context.Background(), interaction.Request{OperatorOpenID: "ou_1"}); err == nil {
+		t.Fatal("expected error when link issuer is not configured")
+	}
+}

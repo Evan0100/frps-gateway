@@ -2,7 +2,7 @@
 
 通过**飞书机器人**管理 frps IP 白名单的 sidecar 服务。
 
-员工在飞书里发送 `/start` 即可打开动态操作卡片；可以查看本人的有效授权、通过按钮撤销授权，或按卡片提示手动提交公网 IP。网关将授权写入 SQLite，并调用 frps 管理 API 更新白名单；只有白名单内的来源 IP 才能访问 frps 映射的端口。
+员工在飞书里发送 `/start` 即可打开动态操作卡片；点击卡片中的「打开授权页面」按钮，网页会自动识别当前公网 IP，确认后即加入白名单。卡片同时支持查看本人的有效授权、通过按钮撤销授权；链接签发失败或过期时回退到手动提交公网 IP。网关将授权写入 SQLite，并调用 frps 管理 API 更新白名单；只有白名单内的来源 IP 才能访问 frps 映射的端口。
 
 ```
 飞书消息（员工） → 一次性 HTTPS 授权链接 → SQLite 用户授权
@@ -13,6 +13,10 @@ frps-gateway ──HTTP + Basic Auth──▶ frps /api/v2/whitelist（持久化
 
 > frps 白名单、飞书机器人、一次性链接和用户授权记录已经形成可运行闭环。公网 HTTPS 证书、真实飞书凭据、云防火墙及反向代理仍属于部署工作。
 
+gateway 独立管理后台位于 `/admin`：以 SQLite grant 为日常授权与长期审计来源，支持当前状态、用户关联、筛选、管理员新增/延期/撤销、访问记录和后台操作审计。frps 的 `/whitelist` 继续作为底层应急控制台；其手工条目会在 gateway 后台标记为只读应急条目，不会被自动接管或删除。
+
+后台可启用多次秘密敲门：未完成敲门时 `/admin` 返回空 404，在短时间内访问高熵敲门地址达到配置次数后才短暂开放登录页。该能力只用于降低扫描发现概率，不能替代 VPN、SSO/MFA 和管理网限制。
+
 ## 指令
 
 | 指令 | 别名 | 说明 |
@@ -22,7 +26,7 @@ frps-gateway ──HTTP + Basic Auth──▶ frps /api/v2/whitelist（持久化
 | `我的授权` | 无 | 列出本人有效授权，也可直接点击卡片按钮 |
 | `撤销授权 1.2.3.4` | 无 | 撤销本人的指定授权，也可直接点击卡片按钮 |
 
-`/start` 卡片中的“申请授权”暂时显示手动输入格式；“我的授权”直接展示当前记录；“撤销授权”列出每个 IP 的确认按钮。原有的申请访问、我的访问、撤销、加白、删白、白名单、help 及英文命令均不再接受。
+`/start` 卡片直接携带一次性「打开授权页面」链接（有效期 `linkTTL`，默认 5 分钟，仅可使用一次）：点击后页面自动识别当前公网 IP，确认即加入白名单，有效期默认 `defaultTTL`。手机双栈网络下页面还会探测 IPv4 出口并一并授权，避免"授权了 IPv6、业务连接走 IPv4"导致无法访问。链接过期或签发失败时，卡片回退到手动输入格式；「我的授权」直接展示当前记录；「撤销授权」列出每个 IP 的确认按钮。原有的申请访问、我的访问、撤销、加白、删白、白名单、help 及英文命令均不再接受。
 
 生产模式建议 `allowAllUsers = true`，并在飞书开放平台将应用可用范围限制为公司成员。群聊默认必须 @机器人，程序只接受 `mentioned_type=bot` 的提及。
 
@@ -79,12 +83,13 @@ cp bot.toml.example bot.toml
 | `[bot] maxTTL/maxActiveIPs` | gateway 强制的 24h 上限和每人 3 个有效 IP 上限 |
 | `[bot] enabled` | 紧急停用飞书长连接；不影响授权页处理已有链接 |
 | `[server]` | 授权页监听地址、HTTPS 公网地址及可信反向代理 |
+| `[admin]` | 独立后台开关、单独账号、会话时长和管理员授权上限 |
 | `[storage] sqliteFile` | 用户授权、一次性令牌、消息幂等及回复 outbox 数据库 |
 
 网关提供 `/healthz`（进程存活）和 `/readyz`（SQLite、frps API 就绪）。飞书事件通过 SQLite inbox 去重并恢复，回复先进入 outbox 再发送；白名单每 30 秒自动对账一次。
 
 `bot.toml` 含密钥，已在 `.gitignore` 中忽略。
-生产环境推荐通过 `passwordEnv` / `passwordFile` 和 `appSecretEnv` / `appSecretFile` 外置密钥，避免把明文放进 TOML。完整上线和回滚步骤见 [`docs/deployment-runbook.md`](./docs/deployment-runbook.md)。
+生产环境推荐通过 `passwordEnv` / `passwordFile`、`appSecretEnv` / `appSecretFile` 和 `admin.passwordEnv` / `admin.passwordFile` 外置密钥，避免把明文放进 TOML。后台账号必须与 frps dashboard 账号不同；后台只应通过 HTTPS 并限制在 VPN、管理网或受控反向代理之后。完整上线和回滚步骤见 [`docs/deployment-runbook.md`](./docs/deployment-runbook.md)。
 
 ## 开发
 

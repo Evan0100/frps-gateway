@@ -9,16 +9,46 @@ import (
 	"frps-gateway/store"
 )
 
-func menuCard() map[string]interface{} {
-	return card("临时网络访问授权", "blue", "当前授权范围：全部现有内网服务\n\n请选择需要执行的操作。", []interface{}{
-		button("申请授权", "primary", map[string]interface{}{"action": "apply"}, nil),
+func menuCard(link, linkTTL string) map[string]interface{} {
+	detail := "当前授权范围：全部现有内网服务\n\n请选择需要执行的操作。"
+	if link != "" {
+		detail = fmt.Sprintf("当前授权范围：全部现有内网服务\n\n点击「打开授权页面」即可自动授权你当前的公网 IP；链接 %s 内有效且仅可使用一次，过期后请重新发送 /start。", linkTTL)
+	}
+	return card("临时网络访问授权", "blue", detail, []interface{}{
+		applyEntry(link),
 		button("我的授权", "default", map[string]interface{}{"action": "list"}, nil),
 		button("撤销授权", "danger", map[string]interface{}{"action": "revoke_menu"}, nil),
 	})
 }
 
-func applyInstructionsCard() map[string]interface{} {
-	return card("申请授权", "wathet", "请查询当前网络的公网 IP，然后发送：\n\n**申请授权 118.25.93.30 4h**\n\n有效期可填写 `30m`、`2h`、`1d`，不填写时默认 4 小时。", []interface{}{
+// applyEntry opens the one-time authorization page when a link was issued and
+// falls back to the manual apply flow otherwise.
+func applyEntry(link string) map[string]interface{} {
+	if link == "" {
+		return button("申请授权", "primary", map[string]interface{}{"action": "apply"}, nil)
+	}
+	return linkButton("打开授权页面", link)
+}
+
+func applyLinkCard(link, ttl, linkTTL string) map[string]interface{} {
+	return card("申请授权", "wathet", fmt.Sprintf("点击下方按钮打开授权页面，页面会自动识别你当前的公网 IP，确认后立即生效。\n\n授权有效期 **%s**；链接 %s 内有效、仅可使用一次，请勿转发。", ttl, linkTTL), []interface{}{
+		linkButton("打开授权页面", link),
+		button("返回菜单", "default", map[string]interface{}{"action": "menu"}, nil),
+	})
+}
+
+// linkButton opens url in a browser or the Feishu webview when clicked.
+func linkButton(text, url string) map[string]interface{} {
+	return map[string]interface{}{
+		"tag":  "button",
+		"text": map[string]interface{}{"tag": "plain_text", "content": text},
+		"type": "primary",
+		"url":  url,
+	}
+}
+
+func applyInstructionsCard(defaultTTL string) map[string]interface{} {
+	return card("申请授权", "wathet", fmt.Sprintf("请先[查询当前网络的公网 IPv4](https://ipv4.icanhazip.com/)，复制页面中唯一显示的 IPv4 地址；若无法访问，可使用[备用查询页](https://www.cip.cc/)，并确认复制的是 IPv4。\n\n然后发送：\n\n**申请授权 203.0.113.10 %s**\n\n有效期可填写 `30m`、`2h`、`1d`，不填写时默认 %s。", defaultTTL, defaultTTL), []interface{}{
 		button("返回菜单", "default", map[string]interface{}{"action": "menu"}, nil),
 	})
 }
@@ -88,7 +118,9 @@ func button(text, buttonType string, value, confirm map[string]interface{}) map[
 }
 
 func cardResponse(data map[string]interface{}) *callback.CardActionTriggerResponse {
-	return &callback.CardActionTriggerResponse{Card: &callback.Card{Type: "card_json", Data: data}}
+	// Card action callbacks accept a raw card payload. "card_json" is a
+	// message content type, not a valid callback response card type.
+	return &callback.CardActionTriggerResponse{Card: &callback.Card{Type: "raw", Data: data}}
 }
 
 func toastResponse(kind, content string) *callback.CardActionTriggerResponse {

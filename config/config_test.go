@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -121,5 +122,61 @@ publicBaseURL="https://access.example.com"`)
 	}
 	if cfg.Bot.MaxTTLDuration() != 24*time.Hour || cfg.Bot.MaxActiveIPs != 3 {
 		t.Fatalf("unsafe defaults: ttl=%v ips=%d", cfg.Bot.MaxTTLDuration(), cfg.Bot.MaxActiveIPs)
+	}
+}
+
+func TestAdminConfigUsesSeparateSecret(t *testing.T) {
+	t.Setenv("FRPS_GATEWAY_TEST_ADMIN_PASSWORD", "a-strong-admin-password")
+	t.Setenv("FRPS_GATEWAY_TEST_KNOCK_SECRET", "a-very-long-random-knock-secret")
+	path := writeConfig(t, `[frps]
+apiAddr="http://127.0.0.1:7500"
+user="frps-admin"
+password="frps-secret"
+[feishu]
+appID="cli_xxx"
+appSecret="feishu-secret"
+[bot]
+allowAllUsers=true
+defaultTTL="4h"
+[server]
+publicBaseURL="https://access.example.com"
+[admin]
+enabled=true
+user="gateway-admin"
+passwordEnv="FRPS_GATEWAY_TEST_ADMIN_PASSWORD"
+sessionTTL="2h"
+maxGrantTTL="1d"
+knockSecretEnv="FRPS_GATEWAY_TEST_KNOCK_SECRET"`)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Admin.Password != "a-strong-admin-password" || cfg.Admin.SessionTTLDuration() != 2*time.Hour || cfg.Admin.MaxGrantTTLDuration() != 24*time.Hour {
+		t.Fatalf("admin config not resolved: %+v", cfg.Admin)
+	}
+	if !cfg.Admin.IsKnockEnabled() || cfg.Admin.KnockHits != 3 || cfg.Admin.KnockWindowDuration() != 30*time.Second || cfg.Admin.KnockTTLDuration() != 5*time.Minute {
+		t.Fatalf("admin knock defaults not resolved: %+v", cfg.Admin)
+	}
+	t.Setenv("FRPS_GATEWAY_TEST_KNOCK_SECRET", "unsafe/knock-secret-that-is-long")
+	if _, err = Load(path); err == nil || !strings.Contains(err.Error(), "letters, digits") {
+		t.Fatalf("want URL-safe knock validation error, got %v", err)
+	}
+}
+
+func TestRejectsPlaintextRemoteFrpsAPI(t *testing.T) {
+	path := writeConfig(t, `[frps]
+apiAddr="http://192.0.2.1:7500"
+user="admin"
+password="secret"
+[feishu]
+appID="cli_xxx"
+appSecret="yyy"
+[bot]
+allowAllUsers=true
+defaultTTL="4h"
+[server]
+publicBaseURL="https://access.example.com"`)
+	if _, err := Load(path); err == nil || !strings.Contains(err.Error(), "loopback") {
+		t.Fatalf("want loopback validation error, got %v", err)
 	}
 }

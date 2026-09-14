@@ -26,9 +26,11 @@ import (
 	"frps-gateway/store"
 )
 
-// Executor executes a chat command with identity and delivery metadata.
+// Executor executes a chat command with identity and delivery metadata and
+// issues one-time authorization links.
 type Executor interface {
 	Execute(ctx context.Context, req interaction.Request) string
+	AuthorizeLink(ctx context.Context, req interaction.Request) (string, error)
 }
 
 type ReplyOutbox interface {
@@ -56,6 +58,8 @@ type Bot struct {
 	requireMention    bool
 	queue             chan *larkim.P2MessageReceiveV1
 	requestsPerMinute int
+	defaultTTL        string
+	linkTTL           string
 	rateMu            sync.Mutex
 	rate              map[string][]time.Time
 	rateCleanup       time.Time
@@ -72,11 +76,28 @@ func New(appID, appSecret, adminChatID string, exec Executor, logger *slog.Logge
 
 // SetReplyOutbox enables durable reply delivery and retry.
 func (b *Bot) SetReplyOutbox(outbox ReplyOutbox) { b.outbox = outbox }
+
+// SetDefaultTTL sets the configured default duration shown in authorization cards.
+func (b *Bot) SetDefaultTTL(defaultTTL string) {
+	if strings.TrimSpace(defaultTTL) != "" {
+		b.defaultTTL = defaultTTL
+	}
+}
+
+// SetLinkTTL sets the one-time link lifetime displayed in authorization cards.
+func (b *Bot) SetLinkTTL(linkTTL string) {
+	if strings.TrimSpace(linkTTL) != "" {
+		b.linkTTL = linkTTL
+	}
+}
+
 func NewSecure(appID, appSecret, encryptKey, verificationToken, adminChatID string, allowAll, requireMention bool, workers, queueSize, rpm int, exec Executor, logger *slog.Logger) *Bot {
 	b := &Bot{
 		appID:       appID,
 		appSecret:   appSecret,
 		adminChatID: adminChatID,
+		defaultTTL:  "4h",
+		linkTTL:     "5m",
 		api:         lark.NewClient(appID, appSecret),
 		exec:        exec,
 		logger:      logger,
@@ -177,7 +198,7 @@ func (b *Bot) handle(e *larkim.P2MessageReceiveV1) error {
 	}
 	b.logger.Info("handle command", "open_id", openID, "chat_id", chatID, "message_id", deref(msg.MessageId))
 	if cmd, parseErr := command.Parse(text); parseErr == nil && cmd.Action == command.ActionMenu {
-		return b.deliverCard(ctx, deref(msg.MessageId)+":menu", chatID, menuCard())
+		return b.deliverCard(ctx, deref(msg.MessageId)+":menu", chatID, b.menuCardFor(ctx, openID, deref(msg.MessageId)+":menu"))
 	}
 
 	reply := b.exec.Execute(ctx, interaction.Request{
@@ -217,7 +238,12 @@ func (b *Bot) onCardAction(ctx context.Context, event *callback.CardActionTrigge
 	}
 	switch action {
 	case "apply":
-		return cardResponse(applyInstructionsCard()), nil
+		link, err := b.exec.AuthorizeLink(ctx, interaction.Request{OperatorOpenID: openID, MessageID: eventID})
+		if err != nil || link == "" {
+			b.logger.Warn("issue authorization link", "open_id", openID, "err", err)
+			return cardResponse(applyInstructionsCard(b.defaultTTL)), nil
+		}
+		return cardResponse(applyLinkCard(link, b.defaultTTL, b.linkTTL)), nil
 	case "list":
 		grants, err := b.userGrants(ctx, openID)
 		if err != nil {
@@ -245,10 +271,21 @@ func (b *Bot) onCardAction(ctx context.Context, event *callback.CardActionTrigge
 		resp.Toast = &callback.Toast{Type: "success", Content: reply}
 		return resp, nil
 	case "menu":
-		return cardResponse(menuCard()), nil
+		return cardResponse(b.menuCardFor(ctx, openID, eventID)), nil
 	default:
 		return toastResponse("error", "不支持的操作"), nil
 	}
+}
+
+// menuCardFor renders the operation menu with a fresh one-time authorization
+// link; issuing failures keep the card usable through the manual apply flow.
+func (b *Bot) menuCardFor(ctx context.Context, openID, id string) map[string]interface{} {
+	link, err := b.exec.AuthorizeLink(ctx, interaction.Request{OperatorOpenID: openID, MessageID: id})
+	if err != nil || link == "" {
+		b.logger.Warn("issue authorization link", "open_id", openID, "err", err)
+		return menuCard("", "")
+	}
+	return menuCard(link, b.linkTTL)
 }
 
 func (b *Bot) userGrants(ctx context.Context, openID string) ([]store.Grant, error) {

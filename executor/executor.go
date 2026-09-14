@@ -66,6 +66,15 @@ func (e *Executor) Execute(ctx context.Context, r interaction.Request) string {
 	}
 	return out
 }
+
+// AuthorizeLink issues a one-time authorization URL for the requesting user;
+// confirming it grants the configured default TTL.
+func (e *Executor) AuthorizeLink(ctx context.Context, r interaction.Request) (string, error) {
+	if e.links == nil {
+		return "", errors.New("authorization links are not configured")
+	}
+	return e.links.NewLink(ctx, r.OperatorOpenID, r.OperatorName, r.MessageID, e.defaultTTL, e.linkTTL)
+}
 func (e *Executor) add(ctx context.Context, r interaction.Request, c *command.Command) string {
 	ttl := c.TTL
 	if ttl == 0 {

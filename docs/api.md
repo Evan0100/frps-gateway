@@ -9,13 +9,38 @@
 | `GET` | `/authorize/{token}` | 一次性令牌 | 显示检测到的公网 IP 和确认页 |
 | `POST` | `/authorize/{token}` | 一次性令牌 | 原子消费令牌、记录用户授权并同步 frps |
 
-令牌为 32 字节加密随机数，SQLite 仅保存 SHA-256；默认 5 分钟过期且只能成功消费一次。GET 与 POST 对无效、过期或重复使用的令牌统一返回 `410 Gone`。每名员工默认最多保留 3 个不同的有效 IP；刷新已有 IP 不占新名额，超限返回 `409 Conflict`，并且不会消费令牌。只有直接连接来自 `server.trustedProxyCIDRs` 时才解析 `X-Forwarded-For`，否则使用 TCP 对端地址。数据库已写入但 frps 同步失败返回 `502`；启动及每 30 秒一次的周期对账会再次应用有效授权。
+令牌为 32 字节加密随机数，SQLite 仅保存 SHA-256；默认 5 分钟过期且只能成功消费一次。GET 与 POST 对无效、过期或重复使用的令牌统一返回 `410 Gone`。每名员工默认最多保留 3 个不同的有效 IP；刷新已有 IP 不占新名额，超限返回 `409 Conflict`，并且不会消费令牌。只有直接连接来自 `server.trustedProxyCIDRs` 时才解析 `X-Forwarded-For`；可信代理请求缺少有效的非可信来源地址时拒绝处理。自动识别和手工新增均拒绝私网、环回、链路本地、组播和未指定地址。数据库已写入但 frps 同步失败返回 `502`；启动及每 30 秒一次的周期对账会再次应用有效授权。
 
 飞书事件先写入 SQLite inbox，落盘成功后才确认；重复事件按 message ID 去重，处理中断后会自动重试。回复采用 SQLite outbox：命令结果先持久化，再由后台发送；发送失败按指数退避重试，并使用由 message ID 派生的稳定 UUID 防止重试产生重复消息。`/healthz` 只表示进程存活；发布验收和监控应使用 `/readyz`，其检查超时为 3 秒。两个端点都不会暴露内部错误或凭据。
 
 飞书交互契约：`/start`、`开始`、`菜单` 返回动态 `interactive` 卡片；手动输入仅接受 `申请授权 <IP> [有效期]`、`我的授权` 和 `撤销授权 <IP>`。原申请访问、我的访问、撤销、加白、删白、白名单、help 及英文命令已移除。卡片动作通过长连接回调 `card.action.trigger` 接收；操作者身份只取回调中的 `operator.open_id`，聊天范围只取 `context.open_chat_id`，不接受按钮 value 传入身份。`list` 动作读取当前用户有效 grant；`revoke` 动作只接受合法 IP，并复用现有按用户撤销、共享 IP 聚合和 MessageID 幂等逻辑；未知动作只返回错误提示，不执行状态变更。
 
 员工授权只提交 TTL，不提交访问时段。同一公网 IP 有多个员工授权时，frps 条目的到期时间取所有有效 grant 的最大值；管理员直接在 frps 设置的访问时段是该 IP 的全局策略，gateway 刷新 TTL 时省略 `windows`，因此不会覆盖该策略。
+
+## frps-gateway 管理后台 HTTP 契约
+
+后台默认关闭；配置 `[admin] enabled=true` 后挂载在 `/admin`。后台账号必须与 frps dashboard 账号不同，密码至少 16 个字符，并通过 `passwordEnv` 或 `passwordFile` 外置。会话仅保存在 gateway 内存中，使用 32 字节随机令牌、`Secure`、`HttpOnly`、`SameSite=Strict` Cookie；gateway 重启或会话到期后需要重新登录。所有状态变更要求同源请求和会话 CSRF 令牌，请求体上限 16 KiB。
+
+配置 `admin.knockSecretEnv` 或 `admin.knockSecretFile` 后启用可选敲门层。未持有有效 gate Cookie 且没有已登录会话时，所有 `/admin` 页面返回无正文 `404`。用户必须在 `knockWindow` 内连续访问 `/admin/knock/{secret}` 达到 `knockHits` 次；前 N-1 次同样返回空 `404`，第 N 次签发仅在内存有效的短期 gate Cookie，并返回 `303 /admin/login`。登录成功后 gate 立即失效；会话失效后需要重新敲门。
+
+| 方法 | 路径 | 鉴权 | 状态 | 行为 |
+|---|---|---|---|---|
+| `GET` | `/admin/login` | gate（敲门关闭时无） | Changed | 创建短期登录 nonce 并显示登录页 |
+| `GET` | `/admin/knock/{secret}` | 高熵敲门 secret + 进度 Cookie | Added | 前 N-1 次空 `404`；第 N 次返回 `303 /admin/login` 并签发短期 gate |
+| `POST` | `/admin/login` | gate + 登录 nonce | Changed | 校验独立后台账号；成功返回 `303 /admin`，连续失败触发 `429` |
+| `POST` | `/admin/logout` | 会话 + CSRF | Added | 销毁当前内存会话并返回 `303 /admin/login` |
+| `GET` | `/admin` | 会话 | Added | 展示 frps 当前条目、gateway 授权、访问记录和后台审计 |
+| `POST` | `/admin/grants` | 会话 + CSRF | Added | 新增管理员授权并立即对账 frps |
+| `POST` | `/admin/grants/{id}/extend` | 会话 + CSRF | Added | 从当前时间重新计算指定授权的有效期并对账 |
+| `POST` | `/admin/grants/{id}/revoke` | 会话 + CSRF | Added | 只撤销指定 grant；同 IP 的其他有效授权继续生效 |
+
+`GET /admin` 支持 `ip`、`user`、`status=active|expired|revoked`、`action=allow|deny`、`actor`、`from`、`to` 过滤；授权、访问记录和后台审计分别使用 `grantPage`、`accessPage`、`auditPage` 分页，每页 50 条。frps 中没有 gateway grant 的条目标记为“frps 应急/手工”，仅展示、不自动接管或删除。
+
+管理员新增字段为 `subject_id`、`subject_name`、`ip`、`ttl`；延期字段为 `ttl`。有效期不得超过 `admin.maxGrantTTL`。新增、延期和撤销先在同一 SQLite 事务中写入 grant 与 `admin_audit`，随后执行 gateway 对账。同步成功时审计结果为 `synced`；同步失败时授权记录仍保留，结果为 `sync_failed`，周期对账会继续重试。
+
+错误行为：表单或 IP/TTL 非法返回 `400`；会话或 CSRF 失败返回重定向或 `403`；记录不存在返回 `404`；记录已经撤销/过期返回 `409`；登录限速返回 `429`；数据库内部错误返回 `500`。响应不包含凭据和内部数据库结构。
+
+敲门层只用于降低后台被一次性扫描发现的概率，不替代登录、MFA、VPN、管理网或反向代理访问控制。secret 至少 24 个字符，只允许 URL 安全的字母、数字、`-`、`_`，且不得复用密码。由于 secret 位于 URL，反向代理必须对 `/admin/knock/` 关闭或脱敏访问日志，浏览器不得收藏、同步或分享该地址。
 
 ## Overview
 
@@ -78,6 +103,9 @@ Basic Auth 失败由 frps 现有中间件直接返回 HTTP 401 和纯文本 `Una
 | 2026-09-03 | Changed | GET | `/api/v2/whitelist/status` | 增加 RFC3339 时间、UTC 偏移和访问日志启用状态 |
 | 2026-09-03 | Added | GET | `/api/v2/whitelist/auditlog` | 查询持久化的成功增删/延期记录 |
 | 2026-09-03 | Added | GET | `/readyz` | gateway SQLite 与 frps 管理链路就绪检查 |
+| 2026-09-04 | Added | GET/POST | `/admin/*` | gateway 独立后台登录、授权管理、筛选、访问记录和审计 |
+| 2026-09-04 | Added | GET | `/admin/knock/{secret}` | 可选多次秘密敲门和短期后台 gate；未敲门时后台返回空 404 |
+| 2026-09-04 | Changed | POST | `/authorize/{token}` | 可信代理缺少有效来源头及特殊地址时拒绝授权 |
 
 ## Whitelist
 
@@ -400,6 +428,14 @@ gateway 对 frps API 响应实施大小上限；超过上限返回本地 `ErrRes
 | 401 | - | `Unauthorized` | Basic Auth 缺失或错误 |
 
 ## Test Method
+
+gateway 后台、会话、CSRF、代理边界、SQLite 审计和 frps 客户端安全行为：
+
+```bash
+go test ./admin ./authorize ./command ./config ./frps ./store
+```
+
+浏览器验收应通过实际 HTTPS 地址访问 `/admin`，依次验证：未登录跳转、错误密码限速、跨站 POST/缺失 CSRF 返回 403、新增/延期/撤销产生审计、同 IP 其他 grant 不受单条撤销影响，以及 frps 手工条目显示为只读。
 
 ```bash
 curl -u admin:password http://127.0.0.1:7500/api/v2/whitelist

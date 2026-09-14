@@ -5,3 +5,6 @@ bot.toml
 frps-gateway
 frps-gateway.exe
 *.exe
+
+# IDE
+.idea/
