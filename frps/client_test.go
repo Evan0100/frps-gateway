@@ -46,7 +46,7 @@ func TestClientV2Envelope(t *testing.T) {
 		t.Fatalf("List() = %+v, want one expected entry", entries)
 	}
 
-	entry, err := client.Add(context.Background(), "5.6.7.8", 2*time.Hour)
+	entry, err := client.Add(context.Background(), "5.6.7.8", 2*time.Hour, "Alice")
 	if err != nil {
 		t.Fatalf("Add() error = %v", err)
 	}
@@ -54,8 +54,46 @@ func TestClientV2Envelope(t *testing.T) {
 		t.Fatalf("Add() = %+v, want server entry", entry)
 	}
 
-	if err := client.Remove(context.Background(), "5.6.7.8"); err != nil {
+	if err := client.Remove(context.Background(), "5.6.7.8", "Alice"); err != nil {
 		t.Fatalf("Remove() error = %v", err)
+	}
+}
+
+func TestClientSendsOperatorLabel(t *testing.T) {
+	var addBody, removeBody map[string]string
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/v2/whitelist", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&addBody)
+		writeJSON(t, w, map[string]any{"code": 200, "msg": "success", "data": Entry{IP: "5.6.7.8", ExpireAt: 1}})
+	})
+	mux.HandleFunc("DELETE /api/v2/whitelist", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&removeBody)
+		writeJSON(t, w, map[string]any{"code": 200, "msg": "success", "data": nil})
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+	client := New(server.URL, "admin", "secret")
+
+	if _, err := client.Add(context.Background(), "5.6.7.8", time.Hour, "Alice"); err != nil {
+		t.Fatalf("Add() error = %v", err)
+	}
+	if addBody["ip"] != "5.6.7.8" || addBody["operator"] != "Alice" {
+		t.Fatalf("add body = %v", addBody)
+	}
+	if err := client.Remove(context.Background(), "5.6.7.8", "Alice"); err != nil {
+		t.Fatalf("Remove() error = %v", err)
+	}
+	if removeBody["operator"] != "Alice" {
+		t.Fatalf("remove body = %v", removeBody)
+	}
+
+	// Gateway-native calls omit the field entirely.
+	addBody = nil
+	if _, err := client.Add(context.Background(), "5.6.7.8", time.Hour, ""); err != nil {
+		t.Fatalf("Add() error = %v", err)
+	}
+	if _, ok := addBody["operator"]; ok {
+		t.Fatalf("empty operator still sent: %v", addBody)
 	}
 }
 
@@ -76,7 +114,7 @@ func TestClientV2EnvelopeError(t *testing.T) {
 	}))
 	defer server.Close()
 
-	err := New(server.URL, "admin", "secret").Remove(context.Background(), "1.2.3.4")
+	err := New(server.URL, "admin", "secret").Remove(context.Background(), "1.2.3.4", "")
 	apiErr, ok := err.(*APIError)
 	if !ok || !apiErr.NotFound() {
 		t.Fatalf("Remove() error = %#v, want not-found APIError", err)

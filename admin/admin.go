@@ -70,7 +70,6 @@ type Handler struct {
 	logger      *slog.Logger
 	user        string
 	password    string
-	origin      string
 	sessionTTL  time.Duration
 	maxGrantTTL time.Duration
 	knock       KnockConfig
@@ -158,11 +157,7 @@ var page = template.Must(template.New("admin").Funcs(template.FuncMap{
 	},
 }).Parse(pageHTML))
 
-func New(st *store.Store, client WhitelistLister, reconciler Reconciler, user, password, publicBaseURL string, sessionTTL, maxGrantTTL time.Duration, knock KnockConfig, logger *slog.Logger) (*Handler, error) {
-	u, err := url.Parse(publicBaseURL)
-	if err != nil || u.Scheme != "https" || u.Host == "" {
-		return nil, errors.New("admin public URL must use https")
-	}
+func New(st *store.Store, client WhitelistLister, reconciler Reconciler, user, password string, sessionTTL, maxGrantTTL time.Duration, knock KnockConfig, logger *slog.Logger) (*Handler, error) {
 	if st == nil || client == nil || reconciler == nil {
 		return nil, errors.New("admin dependencies are required")
 	}
@@ -171,7 +166,7 @@ func New(st *store.Store, client WhitelistLister, reconciler Reconciler, user, p
 	}
 	h := &Handler{
 		store: st, client: client, reconciler: reconciler, logger: logger,
-		user: user, password: password, origin: u.Scheme + "://" + u.Host,
+		user: user, password: password,
 		sessionTTL: sessionTTL, maxGrantTTL: maxGrantTTL, knock: knock,
 		mux: http.NewServeMux(), sessions: map[string]session{}, failures: map[string][]time.Time{}, progress: map[string]knockProgress{}, gates: map[string]time.Time{},
 		mutate: make(chan struct{}, 1),
@@ -323,10 +318,6 @@ func (h *Handler) loginPage(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) login(w http.ResponseWriter, r *http.Request) {
-	if !h.sameOrigin(r) {
-		http.Error(w, "forbidden", http.StatusForbidden)
-		return
-	}
 	if !h.parseForm(w, r) {
 		return
 	}
@@ -410,6 +401,7 @@ type dashboardData struct {
 	AuditPrev, AuditNext                bool
 	GrantQuery, AccessQuery, AuditQuery string
 	FilterIP, FilterUser, FilterStatus  string
+	FilterOwner                         string
 	AccessAction, AuditActor            string
 }
 
@@ -424,6 +416,7 @@ func (h *Handler) dashboard(w http.ResponseWriter, r *http.Request) {
 	accessPage := pageNumber(r.URL.Query().Get("accessPage"))
 	auditPage := pageNumber(r.URL.Query().Get("auditPage"))
 	ip, user := cleanFilter(r.URL.Query().Get("ip")), cleanFilter(r.URL.Query().Get("user"))
+	owner := cleanFilter(r.URL.Query().Get("owner"))
 	status, action := r.URL.Query().Get("status"), r.URL.Query().Get("action")
 	from, to := parseDateRange(r.URL.Query().Get("from"), r.URL.Query().Get("to"))
 	grants, grantTotal, err := h.store.ListGrantRecords(ctx, store.GrantFilter{IP: ip, User: user, Status: status, From: from, To: to, Limit: pageSize, Offset: (grantPage - 1) * pageSize})
@@ -431,7 +424,7 @@ func (h *Handler) dashboard(w http.ResponseWriter, r *http.Request) {
 		h.internalError(w, "list grants", err)
 		return
 	}
-	access, accessTotal, err := h.store.ListAccessRecords(ctx, store.AccessFilter{IP: ip, User: user, Action: action, From: from, To: to, Limit: pageSize, Offset: (accessPage - 1) * pageSize})
+	access, accessTotal, err := h.store.ListAccessRecords(ctx, store.AccessFilter{IP: ip, User: user, Owner: owner, Action: action, From: from, To: to, Limit: pageSize, Offset: (accessPage - 1) * pageSize})
 	if err != nil {
 		h.internalError(w, "list access records", err)
 		return
@@ -450,7 +443,7 @@ func (h *Handler) dashboard(w http.ResponseWriter, r *http.Request) {
 		GrantPrev: grantPage > 1, GrantNext: int64(grantPage*pageSize) < grantTotal,
 		AccessPrev: accessPage > 1, AccessNext: int64(accessPage*pageSize) < accessTotal,
 		AuditPrev: auditPage > 1, AuditNext: int64(auditPage*pageSize) < auditTotal,
-		FilterIP: ip, FilterUser: user, FilterStatus: status, AccessAction: action, AuditActor: r.URL.Query().Get("actor"),
+		FilterIP: ip, FilterUser: user, FilterStatus: status, FilterOwner: owner, AccessAction: action, AuditActor: r.URL.Query().Get("actor"),
 	}
 	data.GrantQuery = queryWithoutPage(r.URL.Query(), "grantPage")
 	data.AccessQuery = queryWithoutPage(r.URL.Query(), "accessPage")
@@ -659,10 +652,6 @@ func (h *Handler) requireMutation(w http.ResponseWriter, r *http.Request) (sessi
 	if !ok {
 		return session{}, false
 	}
-	if !h.sameOrigin(r) {
-		http.Error(w, "forbidden", http.StatusForbidden)
-		return session{}, false
-	}
 	if !h.parseForm(w, r) {
 		return session{}, false
 	}
@@ -730,11 +719,6 @@ func (h *Handler) clearFailures(key string) {
 	h.mu.Lock()
 	delete(h.failures, key)
 	h.mu.Unlock()
-}
-
-func (h *Handler) sameOrigin(r *http.Request) bool {
-	origin := strings.TrimRight(r.Header.Get("Origin"), "/")
-	return origin == "" || origin == h.origin
 }
 
 func (h *Handler) parseForm(w http.ResponseWriter, r *http.Request) bool {

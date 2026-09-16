@@ -22,7 +22,7 @@
 
 - `FRPS_GATEWAY_FRPS_PASSWORD`：frps dashboard/API Basic Auth 密码。
 - `FRPS_GATEWAY_FEISHU_APP_SECRET`：飞书 AppSecret。
-- `FRPS_GATEWAY_ADMIN_PASSWORD`：gateway 独立管理后台密码，至少 16 个字符且不得复用 frps dashboard 密码。
+- `FRPS_GATEWAY_ADMIN_PASSWORD`：gateway 独立管理后台密码，至少 10 个字符且不得复用 frps dashboard 密码。
 - `FRPS_GATEWAY_ADMIN_KNOCK_SECRET`：可选后台敲门 secret，至少 24 个随机字符，不得复用任何密码。
 - 推荐由 systemd `EnvironmentFile` 或权限为 `0600` 的独立文件提供；服务配置和代码仓库不得包含真实值。
 - frps 通信 token、上述密码和 AppSecret 使用不同随机值。发生主机入侵、人员离职或疑似泄露时立即轮换；常规至少每 90 天复核并轮换高权限凭据。
@@ -45,7 +45,7 @@
 
 1. 先部署包含状态持久化改动的新 frps；dashboard/API 保持本机监听，确认 Basic Auth 和通信 token 已配置。
 2. 启动 frps，检查状态文件可写，使用本机管理 API完成增删和重启恢复测试。
-3. 部署 gateway，配置默认 4h、最大 24h、每人最多 3 个有效 IP、`enabled=true`，并在飞书开放平台限制应用可用范围。需要后台时启用 `[admin]`，通过环境变量或受限文件提供独立密码。
+3. 部署 gateway，配置默认 30d、最大 30d、每人最多 10 个有效 IP、`enabled=true`，并在飞书开放平台限制应用可用范围。需要后台时启用 `[admin]`，通过环境变量或受限文件提供独立密码。
 4. 启动 gateway，确认 `/healthz` 返回 200，且 `/readyz` 在 SQLite 和 frps 正常时返回 200、停止 frps 后返回 503；两个端点仅供反向代理或监控访问。
 5. 飞书事件配置订阅 `im.message.receive_v1`，回调配置订阅 `card.action.trigger`，两者均选择长连接并发布应用版本。
 6. 在公司飞书中发送 `/start`，验证“我的授权”和“撤销授权”按钮，再完成一次手动授权并确认 SQLite 用户记录、frps 条目和实际业务访问一致。

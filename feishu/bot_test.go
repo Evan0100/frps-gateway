@@ -110,6 +110,58 @@ func TestStartMenuDeliversCardWithAuthorizationLink(t *testing.T) {
 	}
 }
 
+func TestAuthorizeCommandDeliversLinkCard(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "authorize.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	exec := &cardTestExecutor{link: "https://auth.example.com/authorize/tok_auth"}
+	bot := NewSecure("cli_test", "secret", "", "", "", true, true, 1, 10, 10, exec, slog.Default())
+	bot.SetDefaultTTL("30d")
+	bot.SetLinkTTL("10m")
+	bot.SetReplyOutbox(st)
+
+	if err = bot.handle(msgEvent("om_auth", "ou_user", "oc_chat", "授权")); err != nil {
+		t.Fatal(err)
+	}
+	replies, err := st.PendingReplies(context.Background(), 10)
+	if err != nil || len(replies) != 1 {
+		t.Fatalf("replies=%d err=%v", len(replies), err)
+	}
+	if replies[0].ID != "om_auth:apply" {
+		t.Fatalf("reply id=%q", replies[0].ID)
+	}
+	body := replies[0].Text
+	for _, expected := range []string{interactiveReplyPrefix, "打开授权页面", "https://auth.example.com/authorize/tok_auth", "30d", "10m"} {
+		if !strings.Contains(body, expected) {
+			t.Errorf("authorize reply missing %q: %s", expected, body)
+		}
+	}
+	if exec.linkRequest.OperatorOpenID != "ou_user" || exec.linkRequest.MessageID != "om_auth:apply" {
+		t.Fatalf("unexpected link request: %+v", exec.linkRequest)
+	}
+
+	// Link issuing failures fall back to the manual instructions card.
+	exec.link, exec.linkErr = "", errors.New("store down")
+	if err = bot.handle(msgEvent("om_auth2", "ou_user", "oc_chat", "授权")); err != nil {
+		t.Fatal(err)
+	}
+	replies, err = st.PendingReplies(context.Background(), 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fallback := ""
+	for _, r := range replies {
+		if r.ID == "om_auth2:apply" {
+			fallback = r.Text
+		}
+	}
+	if !strings.Contains(fallback, "申请授权 203.0.113.10") {
+		t.Fatalf("authorize fallback lacks manual instructions: %q", fallback)
+	}
+}
+
 func TestCardApplyActionReturnsFreshLinkCard(t *testing.T) {
 	st, err := store.Open(filepath.Join(t.TempDir(), "apply.db"))
 	if err != nil {

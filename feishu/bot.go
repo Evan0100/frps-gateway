@@ -197,8 +197,13 @@ func (b *Bot) handle(e *larkim.P2MessageReceiveV1) error {
 		return nil
 	}
 	b.logger.Info("handle command", "open_id", openID, "chat_id", chatID, "message_id", deref(msg.MessageId))
-	if cmd, parseErr := command.Parse(text); parseErr == nil && cmd.Action == command.ActionMenu {
-		return b.deliverCard(ctx, deref(msg.MessageId)+":menu", chatID, b.menuCardFor(ctx, openID, deref(msg.MessageId)+":menu"))
+	if cmd, parseErr := command.Parse(text); parseErr == nil {
+		switch cmd.Action {
+		case command.ActionMenu:
+			return b.deliverCard(ctx, deref(msg.MessageId)+":menu", chatID, b.menuCardFor(ctx, openID, deref(msg.MessageId)+":menu"))
+		case command.ActionApply:
+			return b.deliverCard(ctx, deref(msg.MessageId)+":apply", chatID, b.applyCardFor(ctx, openID, deref(msg.MessageId)+":apply"))
+		}
 	}
 
 	reply := b.exec.Execute(ctx, interaction.Request{
@@ -238,12 +243,7 @@ func (b *Bot) onCardAction(ctx context.Context, event *callback.CardActionTrigge
 	}
 	switch action {
 	case "apply":
-		link, err := b.exec.AuthorizeLink(ctx, interaction.Request{OperatorOpenID: openID, MessageID: eventID})
-		if err != nil || link == "" {
-			b.logger.Warn("issue authorization link", "open_id", openID, "err", err)
-			return cardResponse(applyInstructionsCard(b.defaultTTL)), nil
-		}
-		return cardResponse(applyLinkCard(link, b.defaultTTL, b.linkTTL)), nil
+		return cardResponse(b.applyCardFor(ctx, openID, eventID)), nil
 	case "list":
 		grants, err := b.userGrants(ctx, openID)
 		if err != nil {
@@ -286,6 +286,17 @@ func (b *Bot) menuCardFor(ctx context.Context, openID, id string) map[string]int
 		return menuCard("", "")
 	}
 	return menuCard(link, b.linkTTL)
+}
+
+// applyCardFor issues a one-time authorization link and renders the direct
+// apply card; issuing failures fall back to the manual instructions card.
+func (b *Bot) applyCardFor(ctx context.Context, openID, id string) map[string]interface{} {
+	link, err := b.exec.AuthorizeLink(ctx, interaction.Request{OperatorOpenID: openID, MessageID: id})
+	if err != nil || link == "" {
+		b.logger.Warn("issue authorization link", "open_id", openID, "err", err)
+		return applyInstructionsCard(b.defaultTTL)
+	}
+	return applyLinkCard(link, b.defaultTTL, b.linkTTL)
 }
 
 func (b *Bot) userGrants(ctx context.Context, openID string) ([]store.Grant, error) {

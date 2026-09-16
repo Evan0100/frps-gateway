@@ -61,13 +61,18 @@ func (c *Client) List(ctx context.Context) ([]Entry, error) {
 	return entries, nil
 }
 
-// Add adds ip with the given ttl. It returns the stored entry; if frps replies
-// without a body the expiry is computed locally.
-func (c *Client) Add(ctx context.Context, ip string, ttl time.Duration) (Entry, error) {
+// Add adds ip with the given ttl on behalf of operator, the end user behind
+// a delegated change (empty for gateway-native actions); frps shows the
+// label on its whitelist page and audit log. It returns the stored entry;
+// if frps replies without a body the expiry is computed locally.
+func (c *Client) Add(ctx context.Context, ip string, ttl time.Duration, operator string) (Entry, error) {
 	if ttl <= 0 {
 		return Entry{}, fmt.Errorf("ttl must be positive")
 	}
 	body := map[string]string{"ip": ip, "ttl": duration.Format(ttl)}
+	if operator != "" {
+		body["operator"] = operator
+	}
 	var entry Entry
 	if err := c.do(ctx, http.MethodPost, "/api/v2/whitelist", body, &entry); err != nil {
 		return Entry{}, err
@@ -78,9 +83,13 @@ func (c *Client) Add(ctx context.Context, ip string, ttl time.Duration) (Entry, 
 	return entry, nil
 }
 
-// Remove deletes ip from the whitelist; a 404 means it was not present.
-func (c *Client) Remove(ctx context.Context, ip string) error {
+// Remove deletes ip from the whitelist on behalf of operator; a 404 means it
+// was not present.
+func (c *Client) Remove(ctx context.Context, ip, operator string) error {
 	body := map[string]string{"ip": ip}
+	if operator != "" {
+		body["operator"] = operator
+	}
 	return c.do(ctx, http.MethodDelete, "/api/v2/whitelist", body, nil)
 }
 

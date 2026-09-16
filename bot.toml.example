@@ -31,10 +31,10 @@ requireMentionInGroup = true
 # 如果 allowAllUsers=false，则仅受理这个群中的消息。
 # adminChatID = "oc_xxxxxxxx"
 
-# 「申请授权」不带有效期时默认 4h；员工授权最大 24h。
-defaultTTL = "4h"
-maxTTL = "24h"
-maxActiveIPs = 3
+# 「申请授权」不带有效期时默认 30d；员工授权最大 30d，每人最多 10 个有效 IP。
+defaultTTL = "30d"
+maxTTL = "30d"
+maxActiveIPs = 10
 # 一次性授权链接有效期
 linkTTL = "5m"
 workers = 4
@@ -62,7 +62,7 @@ passwordEnv = "FRPS_GATEWAY_ADMIN_PASSWORD"
 # 登录会话仅保存在内存中，gateway 重启后需重新登录。
 sessionTTL = "8h"
 # 管理员单次授权/延期的最大有效期。
-maxGrantTTL = "24h"
+maxGrantTTL = "30d"
 # 可选敲门层：未完成敲门时 /admin 与 /admin/login 返回空 404。
 # 访问 /admin/knock/<secret> 达到 knockHits 次后，登录页临时开放 knockTTL。
 # secret 至少 24 个字符，只能包含字母、数字、-、_；必须随机生成且不要与任何密码复用。

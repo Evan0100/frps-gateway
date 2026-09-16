@@ -32,7 +32,7 @@ func newTestHandler(t *testing.T, client *fakeClient, reconcile *fakeReconciler)
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = st.Close() })
-	h, err := New(st, client, reconcile, "gateway-admin", "a-long-admin-password", "https://access.example.com", time.Hour, 24*time.Hour, KnockConfig{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	h, err := New(st, client, reconcile, "gateway-admin", "a-long-admin-password", time.Hour, 24*time.Hour, KnockConfig{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -137,7 +137,7 @@ func TestAdminMutationRequiresCSRFAndCreatesAudit(t *testing.T) {
 	}
 }
 
-func TestAdminRejectsCrossOriginLogin(t *testing.T) {
+func TestAdminLoginIgnoresOriginHeader(t *testing.T) {
 	h, _ := newTestHandler(t, &fakeClient{}, &fakeReconciler{})
 	w := request(t, h, http.MethodGet, "https://access.example.com/admin/login", nil)
 	nonce := w.Result().Cookies()[0]
@@ -149,8 +149,17 @@ func TestAdminRejectsCrossOriginLogin(t *testing.T) {
 	r.AddCookie(nonce)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, r)
-	if rec.Code != http.StatusForbidden {
-		t.Fatalf("status=%d", rec.Code)
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var hasSession bool
+	for _, c := range rec.Result().Cookies() {
+		if c.Name == sessionCookie && c.Value != "" {
+			hasSession = true
+		}
+	}
+	if !hasSession {
+		t.Fatal("missing session cookie after cross-origin login")
 	}
 }
 
@@ -160,7 +169,7 @@ func TestAdminKnockHidesLoginUntilConfiguredHit(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer st.Close()
-	h, err := New(st, &fakeClient{}, &fakeReconciler{}, "gateway-admin", "a-long-admin-password", "https://access.example.com", time.Hour, 24*time.Hour, KnockConfig{
+	h, err := New(st, &fakeClient{}, &fakeReconciler{}, "gateway-admin", "a-long-admin-password", time.Hour, 24*time.Hour, KnockConfig{
 		Secret: "a-very-long-random-knock-secret",
 		Hits:   3,
 		Window: 30 * time.Second,

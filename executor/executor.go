@@ -10,6 +10,7 @@ import (
 	"frps-gateway/interaction"
 	"frps-gateway/store"
 	"log/slog"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -91,7 +92,7 @@ func (e *Executor) add(ctx context.Context, r interaction.Request, c *command.Co
 			return "授权记录失败：" + err.Error()
 		}
 	}
-	en, err := e.client.Add(ctx, c.IP, ttl)
+	en, err := e.client.Add(ctx, c.IP, ttl, displayUser(r.OperatorName, r.OperatorOpenID))
 	if err != nil {
 		e.logger.Warn("sync whitelist failed", "ip", c.IP, "err", err)
 		return "授权已记录，但同步 frps 失败，请联系管理员：" + err.Error()
@@ -100,7 +101,7 @@ func (e *Executor) add(ctx context.Context, r interaction.Request, c *command.Co
 }
 func (e *Executor) remove(ctx context.Context, r interaction.Request, c *command.Command) string {
 	if e.store == nil {
-		err := e.client.Remove(ctx, c.IP)
+		err := e.client.Remove(ctx, c.IP, displayUser(r.OperatorName, r.OperatorOpenID))
 		var ae *frps.APIError
 		if errors.As(err, &ae) && ae.NotFound() {
 			return c.IP + " 不在白名单中"
@@ -122,9 +123,14 @@ func (e *Executor) remove(ctx context.Context, r interaction.Request, c *command
 		return "撤销已记录，但对账失败：" + err.Error()
 	}
 	if ok {
-		_, err = e.client.Add(ctx, c.IP, time.Until(expiry))
+		// Other users still hold this IP: refresh it under their names.
+		holders, hErr := e.store.ListActiveByIP(ctx, c.IP)
+		if hErr != nil {
+			return "撤销已记录，但对账失败：" + hErr.Error()
+		}
+		_, err = e.client.Add(ctx, c.IP, time.Until(expiry), ownerLabel(holders))
 	} else {
-		err = e.client.Remove(ctx, c.IP)
+		err = e.client.Remove(ctx, c.IP, displayUser(r.OperatorName, r.OperatorOpenID))
 		var ae *frps.APIError
 		if errors.As(err, &ae) && ae.NotFound() {
 			err = nil
@@ -179,13 +185,18 @@ func (e *Executor) Reconcile(ctx context.Context) error {
 		return err
 	}
 	m := map[string]time.Time{}
+	owners := map[string]map[string]bool{}
 	for _, g := range gs {
 		if g.ExpireAt.After(m[g.IP]) {
 			m[g.IP] = g.ExpireAt
 		}
+		if owners[g.IP] == nil {
+			owners[g.IP] = map[string]bool{}
+		}
+		owners[g.IP][displayUser(g.OperatorName, g.OpenID)] = true
 	}
 	for ip, x := range m {
-		if _, err = e.client.Add(ctx, ip, time.Until(x)); err != nil {
+		if _, err = e.client.Add(ctx, ip, time.Until(x), joinOwners(owners[ip])); err != nil {
 			return fmt.Errorf("reconcile %s: %w", ip, err)
 		}
 	}
@@ -197,7 +208,7 @@ func (e *Executor) Reconcile(ctx context.Context) error {
 		if _, active := m[ip]; active {
 			continue
 		}
-		err = e.client.Remove(ctx, ip)
+		err = e.client.Remove(ctx, ip, "")
 		var apiErr *frps.APIError
 		if errors.As(err, &apiErr) && apiErr.NotFound() {
 			err = nil
@@ -224,4 +235,31 @@ func (e *Executor) Ready(ctx context.Context) error {
 		return fmt.Errorf("frps API: %w", err)
 	}
 	return nil
+}
+
+// displayUser renders the acting Feishu user for frps operator labels.
+func displayUser(name, openID string) string {
+	if name != "" {
+		return name
+	}
+	return openID
+}
+
+// ownerLabel lists the distinct users keeping one whitelisted IP alive, so
+// frps shows everyone responsible for the entry.
+func ownerLabel(gs []store.Grant) string {
+	owners := map[string]bool{}
+	for _, g := range gs {
+		owners[displayUser(g.OperatorName, g.OpenID)] = true
+	}
+	return joinOwners(owners)
+}
+
+func joinOwners(owners map[string]bool) string {
+	out := make([]string, 0, len(owners))
+	for n := range owners {
+		out = append(out, n)
+	}
+	sort.Strings(out)
+	return strings.Join(out, "、")
 }

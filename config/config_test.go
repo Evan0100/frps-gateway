@@ -120,7 +120,7 @@ publicBaseURL="https://access.example.com"`)
 	if cfg.Frps.Password != "from-env" || cfg.Feishu.AppSecret != "from-file" {
 		t.Fatalf("secrets not resolved")
 	}
-	if cfg.Bot.MaxTTLDuration() != 24*time.Hour || cfg.Bot.MaxActiveIPs != 3 {
+	if cfg.Bot.MaxTTLDuration() != 30*24*time.Hour || cfg.Bot.MaxActiveIPs != 10 {
 		t.Fatalf("unsafe defaults: ttl=%v ips=%d", cfg.Bot.MaxTTLDuration(), cfg.Bot.MaxActiveIPs)
 	}
 }
@@ -160,6 +160,33 @@ knockSecretEnv="FRPS_GATEWAY_TEST_KNOCK_SECRET"`)
 	t.Setenv("FRPS_GATEWAY_TEST_KNOCK_SECRET", "unsafe/knock-secret-that-is-long")
 	if _, err = Load(path); err == nil || !strings.Contains(err.Error(), "letters, digits") {
 		t.Fatalf("want URL-safe knock validation error, got %v", err)
+	}
+}
+
+func TestAdminPasswordMinimumLength(t *testing.T) {
+	build := func(password string) string {
+		return `[frps]
+apiAddr="http://127.0.0.1:7500"
+user="frps-admin"
+password="frps-secret"
+[feishu]
+appID="cli_xxx"
+appSecret="feishu-secret"
+[bot]
+allowAllUsers=true
+defaultTTL="4h"
+[server]
+publicBaseURL="https://access.example.com"
+[admin]
+enabled=true
+user="gateway-admin"
+password="` + password + `"`
+	}
+	if _, err := Load(writeConfig(t, build("123456789"))); err == nil || !strings.Contains(err.Error(), "at least 10") {
+		t.Fatalf("want short password error, got %v", err)
+	}
+	if _, err := Load(writeConfig(t, build("1234567890"))); err != nil {
+		t.Fatalf("10-char password rejected: %v", err)
 	}
 }
 

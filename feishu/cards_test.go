@@ -23,12 +23,12 @@ func TestMenuCardWithLinkOpensAuthorizationPage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, expected := range []string{"打开授权页面", `"url":"` + link, "5m", "我的授权", "撤销授权"} {
+	for _, expected := range []string{"打开授权页面", `"url":"` + link, "5m", "重新授权", `"action":"apply"`, "我的授权", "撤销授权"} {
 		if !strings.Contains(string(body), expected) {
 			t.Errorf("menu card with link missing %q: %s", expected, body)
 		}
 	}
-	if strings.Contains(string(body), `"action":"apply"`) {
+	if strings.Contains(string(body), "申请授权") {
 		t.Errorf("menu card with link keeps manual apply fallback: %s", body)
 	}
 }

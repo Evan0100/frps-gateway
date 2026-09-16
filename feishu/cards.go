@@ -11,14 +11,18 @@ import (
 
 func menuCard(link, linkTTL string) map[string]interface{} {
 	detail := "当前授权范围：全部现有内网服务\n\n请选择需要执行的操作。"
-	if link != "" {
-		detail = fmt.Sprintf("当前授权范围：全部现有内网服务\n\n点击「打开授权页面」即可自动授权你当前的公网 IP；链接 %s 内有效且仅可使用一次，过期后请重新发送 /start。", linkTTL)
-	}
-	return card("临时网络访问授权", "blue", detail, []interface{}{
+	actions := []interface{}{
 		applyEntry(link),
+	}
+	if link != "" {
+		detail = fmt.Sprintf("当前授权范围：全部现有内网服务\n\n点击「打开授权页面」即可自动授权你当前的公网 IP；链接 %s 内有效且仅可使用一次，过期或用完后点击「重新授权」获取新链接。", linkTTL)
+		actions = append(actions, button("重新授权", "default", map[string]interface{}{"action": "apply"}, nil))
+	}
+	actions = append(actions,
 		button("我的授权", "default", map[string]interface{}{"action": "list"}, nil),
 		button("撤销授权", "danger", map[string]interface{}{"action": "revoke_menu"}, nil),
-	})
+	)
+	return card("临时网络访问授权", "blue", detail, actions)
 }
 
 // applyEntry opens the one-time authorization page when a link was issued and
@@ -48,7 +52,7 @@ func linkButton(text, url string) map[string]interface{} {
 }
 
 func applyInstructionsCard(defaultTTL string) map[string]interface{} {
-	return card("申请授权", "wathet", fmt.Sprintf("请先[查询当前网络的公网 IPv4](https://ipv4.icanhazip.com/)，复制页面中唯一显示的 IPv4 地址；若无法访问，可使用[备用查询页](https://www.cip.cc/)，并确认复制的是 IPv4。\n\n然后发送：\n\n**申请授权 203.0.113.10 %s**\n\n有效期可填写 `30m`、`2h`、`1d`，不填写时默认 %s。", defaultTTL, defaultTTL), []interface{}{
+	return card("申请授权", "wathet", fmt.Sprintf("请先[查询当前网络的公网 IPv4](https://ipv4.icanhazip.com/)，复制页面中唯一显示的 IPv4 地址；若无法访问，可使用[备用查询页](https://www.cip.cc/)，并确认复制的是 IPv4。\n\n然后发送：\n\n**申请授权 203.0.113.10 %s**\n\n有效期可填写 `30m`、`2h`、`1d`、`30d`，不填写时默认 %s。", defaultTTL, defaultTTL), []interface{}{
 		button("返回菜单", "default", map[string]interface{}{"action": "menu"}, nil),
 	})
 }

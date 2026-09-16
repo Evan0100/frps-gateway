@@ -69,6 +69,7 @@
         <div class="grid">
           <div class="field"><label>IP</label><input name="ip" value="{{.FilterIP}}"></div>
           <div class="field"><label>用户 / Open ID</label><input name="user" value="{{.FilterUser}}"></div>
+          <div class="field"><label>发起用户（访问记录）</label><input name="owner" value="{{.FilterOwner}}"></div>
           <div class="field"><label>授权状态</label><select name="status"><option value="">全部</option><option value="active" {{if eq .FilterStatus "active"}}selected{{end}}>有效</option><option value="expired" {{if eq .FilterStatus "expired"}}selected{{end}}>已过期</option><option value="revoked" {{if eq .FilterStatus "revoked"}}selected{{end}}>已撤销</option></select></div>
           <div class="field"><label>访问结果</label><select name="action"><option value="">全部</option><option value="allow" {{if eq .AccessAction "allow"}}selected{{end}}>放行</option><option value="deny" {{if eq .AccessAction "deny"}}selected{{end}}>拒绝</option></select></div>
           <div class="field"><label>开始日期</label><input type="date" name="from"></div>
@@ -89,9 +90,9 @@
 
     <section class="card">
       <h2>访问记录 <span class="muted">共 {{.AccessTotal}} 条</span></h2>
-      <p class="section-note">来自 frps 的运行访问决策，已落库到 SQLite。</p>
-      <div class="table"><table><thead><tr><th>时间</th><th>IP</th><th>frpc 用户</th><th>目标</th><th>结果</th><th>原因</th><th>实例/序号</th></tr></thead><tbody>
-      {{range .Access}}<tr><td>{{fmtTime (unixTime .Time)}}</td><td>{{.IP}}</td><td>{{.User}}</td><td>{{.Source}}</td><td>{{if eq .Action "allow"}}<span class="tag ok">{{accessName .Action}}</span>{{else}}<span class="tag bad">{{accessName .Action}}</span>{{end}}</td><td>{{.Reason}}</td><td><span class="muted">{{.Instance}} / {{.Seq}}</span></td></tr>{{else}}<tr><td colspan="7" class="muted">没有匹配的访问记录</td></tr>{{end}}
+      <p class="section-note">来自 frps 的运行访问决策，已落库到 SQLite。「发起用户」按连接 IP 与授权记录关联：请求发生在某人的有效授权期内时精确归属；标注「非授权时段」表示该 IP 曾属于这些用户但请求时刻不在授权期内（例如授权前的试探或已过期/撤销）。</p>
+      <div class="table"><table><thead><tr><th>时间</th><th>IP</th><th>发起用户</th><th>frpc 用户</th><th>目标</th><th>结果</th><th>原因</th><th>实例/序号</th></tr></thead><tbody>
+      {{range .Access}}<tr><td>{{fmtTime (unixTime .Time)}}</td><td>{{.IP}}</td><td>{{if .Owner}}{{if .OwnerExact}}{{.Owner}}{{else}}{{.Owner}} <span class="muted">(非授权时段)</span>{{end}}{{end}}</td><td>{{.User}}</td><td>{{.Source}}</td><td>{{if eq .Action "allow"}}<span class="tag ok">{{accessName .Action}}</span>{{else}}<span class="tag bad">{{accessName .Action}}</span>{{end}}</td><td>{{.Reason}}</td><td><span class="muted">{{.Instance}} / {{.Seq}}</span></td></tr>{{else}}<tr><td colspan="8" class="muted">没有匹配的访问记录</td></tr>{{end}}
       </tbody></table></div>
       <div class="pagination">{{if .AccessPrev}}<a href="/admin?accessPage={{dec .AccessPage}}{{.AccessQuery}}">上一页</a>{{end}}<span>第 {{.AccessPage}} 页</span>{{if .AccessNext}}<a href="/admin?accessPage={{inc .AccessPage}}{{.AccessQuery}}">下一页</a>{{end}}</div>
     </section>

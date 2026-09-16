@@ -49,7 +49,7 @@ func main() {
 	exec := executor.NewManaged(client, st, auth, cfg.Bot.TTL(), cfg.Bot.MaxTTLDuration(), cfg.Bot.LinkTTLDuration(), cfg.Bot.MaxActiveIPs, logger)
 	auth.SetReadiness(exec.Ready)
 	if cfg.Admin.Enabled {
-		adminHandler, err := admin.New(st, client, exec, cfg.Admin.User, cfg.Admin.Password, cfg.Server.PublicBaseURL, cfg.Admin.SessionTTLDuration(), cfg.Admin.MaxGrantTTLDuration(), admin.KnockConfig{
+		adminHandler, err := admin.New(st, client, exec, cfg.Admin.User, cfg.Admin.Password, cfg.Admin.SessionTTLDuration(), cfg.Admin.MaxGrantTTLDuration(), admin.KnockConfig{
 			Secret: cfg.Admin.KnockSecret,
 			Hits:   cfg.Admin.KnockHits,
 			Window: cfg.Admin.KnockWindowDuration(),

@@ -189,7 +189,7 @@ func (c *Config) validate() error {
 	}
 	c.Bot.defaultTTL = ttl
 	if c.Bot.MaxTTL == "" {
-		c.Bot.MaxTTL = "24h"
+		c.Bot.MaxTTL = "30d"
 	}
 	c.Bot.maxTTL, err = duration.Parse(c.Bot.MaxTTL)
 	if err != nil || c.Bot.maxTTL < c.Bot.defaultTTL {
@@ -212,7 +212,7 @@ func (c *Config) validate() error {
 		c.Bot.RequestsPerMinute = 10
 	}
 	if c.Bot.MaxActiveIPs <= 0 {
-		c.Bot.MaxActiveIPs = 3
+		c.Bot.MaxActiveIPs = 10
 	}
 	if c.Server.ListenAddr == "" {
 		c.Server.ListenAddr = "127.0.0.1:8080"
@@ -236,8 +236,8 @@ func (c *Config) validate() error {
 		if strings.TrimSpace(c.Admin.User) == "" || strings.TrimSpace(c.Admin.Password) == "" {
 			return fmt.Errorf("config error: admin.user and one admin password source are required when admin.enabled=true")
 		}
-		if len(c.Admin.Password) < 16 {
-			return fmt.Errorf("config error: admin password must be at least 16 characters")
+		if len(c.Admin.Password) < 10 {
+			return fmt.Errorf("config error: admin password must be at least 10 characters")
 		}
 		if c.Admin.User == c.Frps.User && c.Admin.Password == c.Frps.Password {
 			return fmt.Errorf("config error: admin credentials must differ from frps dashboard credentials")

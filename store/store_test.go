@@ -304,3 +304,101 @@ func (s *Store) listUser(t *testing.T, openID string) []Grant {
 	}
 	return gs
 }
+
+func TestListAccessRecordsAttributesGrantOwners(t *testing.T) {
+	s, err := Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	ctx := context.Background()
+	now := time.Now()
+	grants := []Grant{
+		{OpenID: "ou_alice", OperatorName: "Alice", IP: "192.0.2.10", Source: "test", CreatedAt: now.Add(-time.Hour), ExpireAt: now.Add(time.Hour)},
+		{OpenID: "ou_bob", OperatorName: "Bob", IP: "198.51.100.7", Source: "test", CreatedAt: now.Add(-time.Hour), ExpireAt: now.Add(time.Hour)},
+		{OpenID: "ou_carol", OperatorName: "Carol", IP: "203.0.113.5", Source: "test", CreatedAt: now.Add(-2 * time.Hour), ExpireAt: now.Add(-time.Hour)},
+		{OpenID: "ou_alice", OperatorName: "Alice", IP: "192.0.2.20", Source: "test", CreatedAt: now.Add(-time.Hour), ExpireAt: now.Add(time.Hour)},
+		{OpenID: "ou_bob", OperatorName: "Bob", IP: "192.0.2.20", Source: "test", CreatedAt: now.Add(-time.Hour), ExpireAt: now.Add(time.Hour)},
+		{OpenID: "ou_dave", IP: "192.0.2.30", Source: "test", CreatedAt: now.Add(-time.Hour), ExpireAt: now.Add(time.Hour)},
+	}
+	for _, g := range grants {
+		if err := s.AddGrantLimited(ctx, g, 10); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if n, err := s.RevokeUserIP(ctx, "ou_bob", "198.51.100.7"); err != nil || n != 1 {
+		t.Fatalf("revoke bob = %d, %v", n, err)
+	}
+
+	records := []AccessRecord{
+		{Instance: "boot1", Seq: 1, Time: now.Unix(), IP: "192.0.2.10", Source: "tcp/p1", Action: "allow", Reason: "whitelisted"},
+		{Instance: "boot1", Seq: 2, Time: now.Unix(), IP: "192.0.2.20", Source: "tcp/p2", Action: "allow", Reason: "whitelisted"},
+		{Instance: "boot1", Seq: 3, Time: now.Add(-2 * time.Hour).Unix(), IP: "192.0.2.10", Source: "tcp/p1", Action: "deny", Reason: "not_in_whitelist"},
+		{Instance: "boot1", Seq: 4, Time: now.Unix(), IP: "198.51.100.7", Source: "tcp/p3", Action: "deny", Reason: "not_in_whitelist"},
+		{Instance: "boot1", Seq: 5, Time: now.Unix(), IP: "203.0.113.5", Source: "tcp/p4", Action: "deny", Reason: "not_in_whitelist"},
+		{Instance: "boot1", Seq: 6, Time: now.Unix(), IP: "192.0.2.99", Source: "tcp/p5", Action: "deny", Reason: "not_in_whitelist"},
+		{Instance: "boot1", Seq: 7, Time: now.Unix(), IP: "192.0.2.30", Source: "tcp/p6", Action: "allow", Reason: "whitelisted"},
+		{Instance: "boot1", Seq: 8, Time: now.Add(time.Hour).Unix(), IP: "192.0.2.10", Source: "tcp/p1", Action: "deny", Reason: "not_in_whitelist"},
+	}
+	if _, err := s.InsertAccessRecords(ctx, records); err != nil {
+		t.Fatal(err)
+	}
+
+	out, _, err := s.ListAccessRecords(ctx, AccessFilter{Limit: 50})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out) != len(records) {
+		t.Fatalf("listed %d records, want %d", len(out), len(records))
+	}
+	bySeq := make(map[uint64]AccessRecord, len(out))
+	for _, rec := range out {
+		bySeq[rec.Seq] = rec
+	}
+	expectations := []struct {
+		seq         uint64
+		ip          string
+		owner       string
+		ownerExact  bool
+		description string
+	}{
+		{1, "192.0.2.10", "Alice", true, "request inside Alice's grant window"},
+		{2, "192.0.2.20", "Alice、Bob", true, "shared IP covered by two live grants"},
+		{3, "192.0.2.10", "Alice", false, "request before the grant started"},
+		{4, "198.51.100.7", "Bob", false, "revoked grant only attributes historically"},
+		{5, "203.0.113.5", "Carol", false, "request after the grant expired"},
+		{6, "192.0.2.99", "", false, "unknown IP stays unattributed"},
+		{7, "192.0.2.30", "ou_dave", true, "empty display name falls back to open_id"},
+		{8, "192.0.2.10", "Alice", false, "request at the expire_at boundary is outside the window"},
+	}
+	for _, want := range expectations {
+		rec, ok := bySeq[want.seq]
+		if !ok {
+			t.Fatalf("missing access record seq=%d", want.seq)
+		}
+		if rec.IP != want.ip || rec.Owner != want.owner || rec.OwnerExact != want.ownerExact {
+			t.Errorf("seq=%d (%s): ip=%s owner=%q exact=%v, want %s/%q/%v", want.seq, want.description, rec.IP, rec.Owner, rec.OwnerExact, want.ip, want.owner, want.ownerExact)
+		}
+	}
+
+	// The owner filter matches grants by display name or open_id.
+	filtered, total, err := s.ListAccessRecords(ctx, AccessFilter{Owner: "Bob", Limit: 50})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if total != 2 || len(filtered) != 2 {
+		t.Fatalf("owner filter Bob: total=%d len=%d, want records for 198.51.100.7 and 192.0.2.20", total, len(filtered))
+	}
+	for _, rec := range filtered {
+		if rec.IP != "198.51.100.7" && rec.IP != "192.0.2.20" {
+			t.Errorf("owner filter returned unexpected IP %s", rec.IP)
+		}
+	}
+	filtered, total, err = s.ListAccessRecords(ctx, AccessFilter{Owner: "ou_dave", Limit: 50})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if total != 1 || len(filtered) != 1 || filtered[0].IP != "192.0.2.30" {
+		t.Fatalf("owner filter by open_id: total=%d len=%d", total, len(filtered))
+	}
+}

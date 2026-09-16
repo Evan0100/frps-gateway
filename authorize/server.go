@@ -187,8 +187,14 @@ func (s *Server) post(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "授权失败", 500)
 		return
 	}
+	// Label the frps entry with the Feishu user behind the token so the
+	// whitelist page shows who the entry belongs to.
+	operator := grants[0].OperatorName
+	if operator == "" {
+		operator = grants[0].OpenID
+	}
 	for _, g := range grants {
-		if _, err = s.client.Add(r.Context(), g.IP, time.Until(g.ExpireAt)); err != nil {
+		if _, err = s.client.Add(r.Context(), g.IP, time.Until(g.ExpireAt), operator); err != nil {
 			s.logger.Error("apply whitelist grant", "ip", g.IP, "err", err)
 			http.Error(w, "授权已记录，但同步 frps 失败，请联系管理员", 502)
 			return

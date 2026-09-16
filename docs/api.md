@@ -19,7 +19,7 @@
 
 ## frps-gateway 管理后台 HTTP 契约
 
-后台默认关闭；配置 `[admin] enabled=true` 后挂载在 `/admin`。后台账号必须与 frps dashboard 账号不同，密码至少 16 个字符，并通过 `passwordEnv` 或 `passwordFile` 外置。会话仅保存在 gateway 内存中，使用 32 字节随机令牌、`Secure`、`HttpOnly`、`SameSite=Strict` Cookie；gateway 重启或会话到期后需要重新登录。所有状态变更要求同源请求和会话 CSRF 令牌，请求体上限 16 KiB。
+后台默认关闭；配置 `[admin] enabled=true` 后挂载在 `/admin`。后台账号必须与 frps dashboard 账号不同，密码至少 10 个字符，并通过 `passwordEnv` 或 `passwordFile` 外置。会话仅保存在 gateway 内存中，使用 32 字节随机令牌、`Secure`、`HttpOnly`、`SameSite=Strict` Cookie；gateway 重启或会话到期后需要重新登录。所有状态变更要求会话 CSRF 令牌，请求体上限 16 KiB。
 
 配置 `admin.knockSecretEnv` 或 `admin.knockSecretFile` 后启用可选敲门层。未持有有效 gate Cookie 且没有已登录会话时，所有 `/admin` 页面返回无正文 `404`。用户必须在 `knockWindow` 内连续访问 `/admin/knock/{secret}` 达到 `knockHits` 次；前 N-1 次同样返回空 `404`，第 N 次签发仅在内存有效的短期 gate Cookie，并返回 `303 /admin/login`。登录成功后 gate 立即失效；会话失效后需要重新敲门。
 

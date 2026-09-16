@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -53,6 +54,7 @@ type GrantFilter struct {
 
 type AccessFilter struct {
 	IP, User, Action string
+	Owner            string
 	From, To         time.Time
 	Limit, Offset    int
 }
@@ -399,6 +401,9 @@ func (s *Store) ListUser(ctx context.Context, openID string) ([]Grant, error) {
 func (s *Store) ListActive(ctx context.Context) ([]Grant, error) {
 	return s.list(ctx, `WHERE revoked_at IS NULL AND expire_at>?`, time.Now().Unix())
 }
+func (s *Store) ListActiveByIP(ctx context.Context, ip string) ([]Grant, error) {
+	return s.list(ctx, `WHERE ip=? AND revoked_at IS NULL AND expire_at>?`, ip, time.Now().Unix())
+}
 func (s *Store) list(ctx context.Context, where string, args ...any) ([]Grant, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT open_id,operator_name,ip,source,created_at,expire_at FROM grants `+where+` ORDER BY expire_at`, args...)
 	if err != nil {
@@ -617,15 +622,21 @@ func (s *Store) SetAdminAuditResult(ctx context.Context, id int64, result, detai
 }
 
 // AccessRecord is one whitelist enforcement decision shipped from frps.
+// Owner attributes the connecting IP to the Feishu user(s) behind it: frps
+// only sees the IP, so the owner is derived from grants at read time.
+// OwnerExact marks records whose request moment fell inside a live grant;
+// otherwise the IP only ever belonged to the listed users.
 type AccessRecord struct {
-	Instance string
-	Seq      uint64
-	Time     int64
-	IP       string
-	User     string
-	Source   string
-	Action   string
-	Reason   string
+	Instance   string
+	Seq        uint64
+	Time       int64
+	IP         string
+	User       string
+	Owner      string
+	OwnerExact bool
+	Source     string
+	Action     string
+	Reason     string
 }
 
 // InsertAccessRecords stores records in one transaction. Records already
@@ -689,6 +700,12 @@ func (s *Store) ListAccessRecords(ctx context.Context, f AccessFilter) ([]Access
 		where = append(where, "user LIKE ?")
 		args = append(args, "%"+f.User+"%")
 	}
+	if f.Owner != "" {
+		// frps never learns the Feishu identity, so "owner" filters by the
+		// grants table: every user who holds (or ever held) the connecting IP.
+		where = append(where, "ip IN (SELECT ip FROM grants WHERE operator_name LIKE ? OR open_id LIKE ?)")
+		args = append(args, "%"+f.Owner+"%", "%"+f.Owner+"%")
+	}
 	if f.Action == "allow" || f.Action == "deny" {
 		where = append(where, "action=?")
 		args = append(args, f.Action)
@@ -721,7 +738,94 @@ func (s *Store) ListAccessRecords(ctx context.Context, f AccessFilter) ([]Access
 		}
 		out = append(out, rec)
 	}
-	return out, total, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, 0, err
+	}
+	if err := s.attachAccessOwners(ctx, out); err != nil {
+		return nil, 0, err
+	}
+	return out, total, nil
+}
+
+// attachAccessOwners fills Owner/OwnerExact on the given page of access
+// records by matching each connecting IP against grants: users with a live
+// grant covering the request moment are exact owners; when none covers it,
+// every user that ever held the IP is listed instead.
+func (s *Store) attachAccessOwners(ctx context.Context, records []AccessRecord) error {
+	if len(records) == 0 {
+		return nil
+	}
+	ips := make([]string, 0, len(records))
+	seen := make(map[string]bool, len(records))
+	for _, r := range records {
+		if !seen[r.IP] {
+			seen[r.IP] = true
+			ips = append(ips, r.IP)
+		}
+	}
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(ips)), ",")
+	args := make([]any, len(ips))
+	for i, ip := range ips {
+		args[i] = ip
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT ip,open_id,operator_name,created_at,expire_at,revoked_at FROM grants WHERE ip IN (`+placeholders+`)`, args...)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	type grantWindow struct {
+		display             string
+		createdAt, expireAt int64
+		revoked             bool
+	}
+	byIP := make(map[string][]grantWindow, len(ips))
+	for rows.Next() {
+		var ip, openID, name string
+		var created, expire int64
+		var revoked sql.NullInt64
+		if err := rows.Scan(&ip, &openID, &name, &created, &expire, &revoked); err != nil {
+			return err
+		}
+		display := name
+		if display == "" {
+			display = openID
+		}
+		byIP[ip] = append(byIP[ip], grantWindow{display: display, createdAt: created, expireAt: expire, revoked: revoked.Valid})
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for i := range records {
+		var covered, ever map[string]bool
+		for _, gw := range byIP[records[i].IP] {
+			if ever == nil {
+				ever = map[string]bool{}
+			}
+			ever[gw.display] = true
+			if !gw.revoked && gw.createdAt <= records[i].Time && records[i].Time < gw.expireAt {
+				if covered == nil {
+					covered = map[string]bool{}
+				}
+				covered[gw.display] = true
+			}
+		}
+		if len(covered) > 0 {
+			records[i].Owner = joinNames(covered)
+			records[i].OwnerExact = true
+		} else if len(ever) > 0 {
+			records[i].Owner = joinNames(ever)
+		}
+	}
+	return nil
+}
+
+func joinNames(names map[string]bool) string {
+	out := make([]string, 0, len(names))
+	for n := range names {
+		out = append(out, n)
+	}
+	sort.Strings(out)
+	return strings.Join(out, "、")
 }
 
 func (s *Store) ListAdminAudits(ctx context.Context, f AuditFilter) ([]AdminAudit, int64, error) {

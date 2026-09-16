@@ -20,6 +20,7 @@ const (
 	ActionList   Action = "list"
 	ActionHelp   Action = "help"
 	ActionMenu   Action = "menu"
+	ActionApply  Action = "apply"
 )
 
 // Long aliases first so e.g. "list..." is not split by "ls".
@@ -28,6 +29,7 @@ var (
 	removeAliases = []string{"撤销授权"}
 	listAliases   = []string{"我的授权"}
 	menuAliases   = []string{"/start", "开始", "菜单"}
+	applyAliases  = []string{"授权", "/auth"}
 
 	// feishu renders @mentions inside text as @_user_1 placeholders
 	mentionPattern = regexp.MustCompile(`@_user_\d+`)
@@ -38,6 +40,7 @@ var (
 // Usage is the help text replied for unknown or malformed instructions.
 const Usage = `可用指令：
   /start                    打开操作菜单
+  授权                      直接获取一次性授权链接
   申请授权 <IP> [有效期]   为指定公网 IP 添加临时授权
   我的授权                  查看自己的有效授权
   撤销授权 <IP>             撤销指定授权；其他人的授权不受影响
@@ -69,6 +72,11 @@ func Parse(raw string) (*Command, error) {
 		return parseRemove(fields[1:])
 	case contains(listAliases, head):
 		return &Command{Action: ActionList}, nil
+	case contains(applyAliases, head):
+		if len(fields) > 1 {
+			return &Command{Action: ActionHelp}, fmt.Errorf("授权指令无需参数，直接发送「授权」即可；如需指定 IP 请使用「申请授权 <IP> [有效期]」")
+		}
+		return &Command{Action: ActionApply}, nil
 	default:
 		return &Command{Action: ActionHelp}, fmt.Errorf("无法识别该操作，请发送 /start 打开菜单")
 	}

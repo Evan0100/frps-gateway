@@ -153,7 +153,9 @@ func TestAuthorizePostGrantsConnectionAndReportedIPv4(t *testing.T) {
 			w.WriteHeader(http.StatusNotFound)
 			return
 		}
-		var body struct{ IP string `json:"ip"` }
+		var body struct {
+			IP string `json:"ip"`
+		}
 		_ = json.NewDecoder(r.Body).Decode(&body)
 		mu.Lock()
 		added = append(added, body.IP)
